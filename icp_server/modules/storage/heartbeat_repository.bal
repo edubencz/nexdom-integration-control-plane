@@ -483,7 +483,11 @@ isolated function writeObservedStateMI(string runtimeId, string componentId, str
         entries.push([{artifactName: ds.name, artifactType: "data-service"}, {"status": normalizeDataServiceState(ds.state)}]);
     }
     foreach types:Connector conn in <types:Connector[]>artifacts.connectors {
-        entries.push([{artifactName: conn.name, artifactType: "connector"}, {"status": conn.state}]);
+        // Connector names are only unique within a package. Keep the
+        // reconcile identity aligned with the connector artifact table,
+        // whose key is (runtime_id, connector_name, package).
+        string qualName = types:qualifiedArtifactName(conn.name, conn.'package);
+        entries.push([{artifactName: qualName, artifactType: "connector"}, {"status": conn.state}]);
     }
     foreach types:MessageStore store in <types:MessageStore[]>artifacts.messageStores {
         entries.push([{artifactName: store.name, artifactType: "message-store"}, {"status": store.state}]);

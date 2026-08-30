@@ -1672,7 +1672,8 @@ service /graphql on graphqlListener {
         }
         map<map<types:ArtifactStateField>> sm = check storage:queryArtifactState(componentId, environmentId);
         foreach types:Connector a in result {
-            types:ArtifactStateField? s = stateOf(sm, a.name, "connector", "status");
+            string qualName = types:qualifiedArtifactName(a.name, a.'package);
+            types:ArtifactStateField? s = stateOf(sm, qualName, "connector", "status");
             if s is types:ArtifactStateField {
                 a.state = <types:ArtifactState>s.value;
                 a.stateInSync = s.inSync;

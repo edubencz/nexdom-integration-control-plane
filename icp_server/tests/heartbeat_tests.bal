@@ -38,6 +38,8 @@ const string HB_RESTART_NAME = "hb-restart-test-unique-runtime";
 // Service-listener binding test: dedicated ID cleaned up via an AfterGroups
 // teardown so rows never leak when an assertion aborts the test.
 const string HB_SERVICE_LISTENER_ID = "aa000001-test-test-test-000000000010";
+// Connector identity regression test: same connector name in two packages.
+const string HB_CONNECTOR_ID = "aa000001-test-test-test-000000000011";
 
 // =============================================================================
 // Helpers
@@ -148,6 +150,62 @@ function testServiceListenerBindingRoundTrip() returns error? {
 }
 function afterServiceListenerTests() {
     cleanupRuntime(HB_SERVICE_LISTENER_ID);
+}
+
+// =============================================================================
+// Test: connector reconcile identity includes package
+//
+// MI permits connectors with the same name in different packages. The runtime
+// artifact table keys them by (name, package), so the observed-state key must
+// preserve that distinction as well.
+// =============================================================================
+@test:Config {
+    groups: ["heartbeat", "mi-artifacts", "connector-identity"]
+}
+function testMIConnectorIdentityIncludesPackage() returns error? {
+    string runtimeId = HB_CONNECTOR_ID;
+    cleanupRuntime(runtimeId);
+
+    types:Component|error? componentResult = storage:createComponent({
+        projectId: HB_PROJECT_ID,
+        name: "hb-mi-connector-identity",
+        componentType: types:MI
+    });
+    if componentResult is error {
+        return componentResult;
+    }
+    if componentResult is () {
+        return error("Failed to create MI component for connector identity test");
+    }
+    string componentId = componentResult.id;
+
+    types:Heartbeat heartbeat = buildMIHeartbeat(runtimeId);
+    heartbeat.component = componentId;
+    heartbeat.artifacts.connectors = [
+        {name: "sharedConnector", 'package: "org.example.first", version: "1.0.0", state: "enabled"},
+        {name: "sharedConnector", 'package: "org.example.second", version: "1.0.0", state: "disabled"}
+    ];
+
+    types:HeartbeatResponse first = check storage:processHeartbeat(heartbeat, preResolved = true);
+    test:assertTrue(first.acknowledged, "Heartbeat with same-name connectors should be acknowledged");
+
+    types:Connector[] connectors = check storage:getConnectorsForRuntime(runtimeId);
+    test:assertEquals(connectors.length(), 2, "Both package-qualified connectors should be stored");
+
+    map<string> firstObserved = check storage:readReconcileObservedState(runtimeId,
+        {artifactName: "org.example.first:sharedConnector", artifactType: "connector"});
+    map<string> secondObserved = check storage:readReconcileObservedState(runtimeId,
+        {artifactName: "org.example.second:sharedConnector", artifactType: "connector"});
+    test:assertEquals(firstObserved["status"], "enabled", "First connector state should be observed");
+    test:assertEquals(secondObserved["status"], "disabled", "Second connector state should be observed");
+
+    // A subsequent full heartbeat must remain idempotent and must not produce
+    // the H2 duplicate-target MERGE failure that caused the original loop.
+    types:HeartbeatResponse second = check storage:processHeartbeat(heartbeat, preResolved = true);
+    test:assertTrue(second.acknowledged, "Repeated heartbeat should be acknowledged");
+
+    cleanupRuntime(runtimeId);
+    check storage:deleteComponent(componentId);
 }
 
 // =============================================================================
