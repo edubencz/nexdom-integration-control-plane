@@ -28,6 +28,8 @@ interface RuntimeConfig {
   VITE_OBSERVABILITY_URL?: string;
   VITE_WORKFLOW_URL?: string;
   VITE_TRYIT_URL?: string;
+  VITE_MI_APPLICATIONS_URL?: string;
+  VITE_MI_SERVER_URL?: string;
   VITE_WS_URL?: string;
   VITE_SSO_ENABLED?: boolean;
   VITE_SSO_ISSUER?: string;
@@ -42,6 +44,8 @@ export interface ApiConfig {
   observabilityUrl: string;
   workflowUrl: string;
   tryitUrl: string;
+  miApplicationsUrl: string;
+  miServerUrl: string;
   wsUrl: string;
   ssoEnabled: boolean;
   ssoIssuer: string;
@@ -64,6 +68,8 @@ const DEFAULT_CONFIG: ApiConfig = {
   observabilityUrl: 'https://localhost:9446/icp/observability',
   workflowUrl: 'https://localhost:9446/icp/workflow',
   tryitUrl: 'https://localhost:9446/icp/tryit',
+  miApplicationsUrl: 'https://localhost:9446/icp/mi_applications',
+  miServerUrl: 'https://localhost:9446/icp/mi_server',
   wsUrl: 'wss://localhost:9446/runtime-status',
   ssoEnabled: false,
   ssoIssuer: '',
@@ -91,6 +97,8 @@ export async function loadConfig(): Promise<void> {
       observabilityUrl: config.VITE_OBSERVABILITY_URL || DEFAULT_CONFIG.observabilityUrl,
       workflowUrl: config.VITE_WORKFLOW_URL || DEFAULT_CONFIG.workflowUrl,
       tryitUrl: config.VITE_TRYIT_URL || DEFAULT_CONFIG.tryitUrl,
+      miApplicationsUrl: config.VITE_MI_APPLICATIONS_URL || DEFAULT_CONFIG.miApplicationsUrl,
+      miServerUrl: config.VITE_MI_SERVER_URL || DEFAULT_CONFIG.miServerUrl,
       wsUrl: config.VITE_WS_URL || DEFAULT_CONFIG.wsUrl,
       ssoEnabled: config.VITE_SSO_ENABLED ?? DEFAULT_CONFIG.ssoEnabled,
       ssoIssuer: config.VITE_SSO_ISSUER || DEFAULT_CONFIG.ssoIssuer,
@@ -146,3 +154,14 @@ export const workflowApiUrl = (componentId: string, environmentId: string, subpa
  */
 export const tryitApiUrl = (componentId: string, environmentId: string, runtimeId: string, port: number, subpath: string): string =>
   `${window.API_CONFIG.tryitUrl.replace(/\/+$/, '')}/${encodeURIComponent(componentId)}/${encodeURIComponent(environmentId)}/${encodeURIComponent(runtimeId)}/${port}${subpath}`;
+
+/** Builds a URL to the MI REST API Try-It proxy. The API name is resolved and
+ * authorized server-side; the browser never supplies the runtime host/port. */
+export const miTryitApiUrl = (componentId: string, environmentId: string, runtimeId: string, apiName: string): string =>
+  `${window.API_CONFIG.tryitUrl.replace(/\/+$/, '')}/mi/${encodeURIComponent(componentId)}/${encodeURIComponent(environmentId)}/${encodeURIComponent(runtimeId)}/${encodeURIComponent(apiName)}`;
+
+export const miApplicationsApiUrl = (componentId: string, environmentId: string, runtimeId: string, appName?: string): string =>
+  `${window.API_CONFIG.miApplicationsUrl.replace(/\/+$/, '')}/${encodeURIComponent(componentId)}/${encodeURIComponent(environmentId)}/${encodeURIComponent(runtimeId)}${appName ? `/${encodeURIComponent(appName)}` : ''}`;
+
+export const miServerApiUrl = (componentId: string, environmentId: string, runtimeId: string): string =>
+  `${window.API_CONFIG.miServerUrl.replace(/\/+$/, '')}/${encodeURIComponent(componentId)}/${encodeURIComponent(environmentId)}/${encodeURIComponent(runtimeId)}`;

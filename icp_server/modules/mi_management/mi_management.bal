@@ -53,7 +53,7 @@ public const string ARTIFACT_TYPE_DATA_SOURCE = "data-source";
 // Artifact-specific fetch functions
 // ============================================================
 
-isolated function fetchApiArtifact(http:Client mgmtClient, string hmacToken, string apiName) returns types:MgmtRestApiInfo|error {
+public isolated function fetchApiArtifact(http:Client mgmtClient, string hmacToken, string apiName) returns types:MgmtRestApiInfo|error {
     string path = string `${MGMT_API_PATH}/apis?apiName=${apiName}`;
     log:printDebug("Calling MI management API", path = path);
     types:MgmtRestApiInfo respResult = check mgmtClient->get(path, {
@@ -61,6 +61,71 @@ isolated function fetchApiArtifact(http:Client mgmtClient, string hmacToken, str
         [HEADER_ACCEPT]: CONTENT_TYPE_JSON
     });
     return respResult;
+}
+
+// Fetch the OpenAPI document exposed by the API's own listener. The listener port and scheme
+// come from the MI Management API response; only the host is replaced with the runtime host
+// already trusted by ICP. MI listeners are not stored in the BI listener table.
+public isolated function fetchApiSwagger(types:Runtime runtime, string componentId, string environmentId,
+        types:MgmtRestApiInfo apiInfo, boolean allowInsecureTLS) returns string|error {
+    if runtime.managementHostname is () {
+        return error("Runtime hostname is not configured");
+    }
+    if apiInfo.url is () {
+        return error(string `MI did not return a URL for API '${apiInfo.name}'`);
+    }
+
+    string apiUrl = apiInfo.url ?: "";
+    int? schemeEnd = apiUrl.indexOf("://");
+    if schemeEnd is () {
+        return error(string `Invalid MI API URL: ${apiUrl}`);
+    }
+    string scheme = apiUrl.substring(0, schemeEnd).toLowerAscii();
+    if scheme != "http" && scheme != "https" {
+        return error(string `Unsupported MI API URL scheme '${scheme}'`);
+    }
+    int? pathStart = apiUrl.indexOf("/", schemeEnd + 3);
+    if pathStart is () {
+        return error(string `Invalid MI API URL (missing path): ${apiUrl}`);
+    }
+    string authority = apiUrl.substring(schemeEnd + 3, pathStart);
+    int? portSeparator = authority.lastIndexOf(":");
+    string portText = portSeparator is int ? authority.substring(portSeparator + 1) : "";
+    // MI uses -1 when the management API cannot determine the listener port.
+    // Treat that sentinel as absent and fall back to the port encoded in the
+    // API URL (the same URL used by the runtime to expose the API).
+    int listenerPort = portText == "" ? (scheme == "https" ? 443 : 80) : check int:fromString(portText);
+    int? configuredPort = apiInfo.port;
+    if configuredPort is int && configuredPort > 0 {
+        listenerPort = configuredPort;
+    }
+    if listenerPort < 1 || listenerPort > 65535 {
+        return error(string `Invalid MI API listener port: ${listenerPort}`);
+    }
+
+    string runtimeHost = runtime.managementHostname ?: "";
+    string baseUrl = string `${scheme}://${runtimeHost}:${listenerPort.toString()}`;
+    http:Client|error clientResult = allowInsecureTLS
+        ? new (baseUrl, {secureSocket: {enable: false}})
+        : new (baseUrl);
+    if clientResult is error {
+        return error(string `Failed to create API listener client: ${clientResult.message()}`);
+    }
+    http:Response|error responseResult = clientResult->get(string `/${apiInfo.name}?swagger.json`, {
+        [HEADER_ACCEPT]: CONTENT_TYPE_JSON
+    });
+    if responseResult is error {
+        return error(string `OpenAPI fetch failed: ${responseResult.message()}`);
+    }
+    if responseResult.statusCode < 200 || responseResult.statusCode >= 300 {
+        string|error body = responseResult.getTextPayload();
+        return error(string `OpenAPI fetch returned status ${responseResult.statusCode}: ${body is string ? body : "Unknown error"}`);
+    }
+    string|error document = responseResult.getTextPayload();
+    if document is error {
+        return error(string `Failed to read OpenAPI document: ${document.message()}`);
+    }
+    return document;
 }
 
 public isolated function fetchProxyServiceArtifact(http:Client mgmtClient, string hmacToken, string proxyServiceName) returns types:MgmtProxyServiceInfo|error {
@@ -593,4 +658,3 @@ public isolated function createRegistryManagementClient(types:Runtime runtime, s
     log:printDebug("Registry management client created", runtimeId = runtimeId, baseUrl = baseUrl);
     return {mgmtClient, hmacToken};
 }
-

@@ -85,7 +85,7 @@ tasks.register('buildBiE2eArtifact') {
         }
         exec {
             workingDir workDir
-            commandLine 'bal', 'build'
+            commandLine System.getProperty('os.name').toLowerCase().contains('windows') ? 'bal.bat' : 'bal', 'build'
         }
     }
 }

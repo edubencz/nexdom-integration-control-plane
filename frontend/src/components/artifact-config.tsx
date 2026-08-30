@@ -41,6 +41,7 @@ export const ARTIFACT_ICONS: Record<string, JSX.Element> = {
   CompositeApp: <Package size={18} />,
   Connector: <Plug size={18} />,
   RegistryResource: <FolderArchive size={18} />,
+  Server: <Server size={18} />,
   Listener: <Wifi size={18} />,
   Service: <Layers size={18} />,
   Automation: <Zap size={18} />,

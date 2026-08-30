@@ -710,6 +710,15 @@ public type Runtime record {
     OpenApiDefinitionRecord[] openApiDefinitions?;
 };
 
+// Live REST API details fetched from a Micro Integrator runtime. Document fields remain opaque
+// strings because their shape varies between Swagger 2 and OpenAPI 3 definitions.
+public type MiApiDetails record {
+    string runtimeId;
+    string metadata;
+    string? openApi;
+    string? configuration;
+};
+
 public type ServiceRecordInDB record {
     string service_name;
     string service_package;
@@ -951,6 +960,16 @@ public type WorkflowTarget record {|
 public type TryItTarget record {|
     string host;
     string protocol;
+|};
+
+// Resolved target for an MI REST API Try-It request. Unlike BI services, MI API
+// listeners are not represented in bi_runtime_listener_artifacts; the API URL
+// and context are therefore resolved from the MI artifact row.
+public type MiTryItTarget record {|
+    string host;
+    string protocol;
+    int port;
+    string context;
 |};
 
 public type Automation record {

@@ -188,6 +188,73 @@ function proxyTryItRequest(string componentId, string environmentId, string runt
     return upstream;
 }
 
+// MI counterpart of proxyTryItRequest. MI API listeners are resolved by API
+// name because they are not registered in the BI listener artifact table.
+function proxyMiTryItRequest(string componentId, string environmentId, string runtimeId,
+        string apiName, string[] restPath, http:Request req) returns http:Response {
+    string|http:HeaderNotFoundError authHeader = req.getHeader("Authorization");
+    if authHeader is http:HeaderNotFoundError {
+        return tryitErrorResponse(401, "Authorization header missing");
+    }
+    types:UserContextV2|error userContext = auth:extractUserContextV2(authHeader);
+    if userContext is error {
+        return tryitErrorResponse(401, "Invalid token: " + userContext.message());
+    }
+    string|error projectId = storage:getProjectIdByComponentId(componentId);
+    if projectId is error {
+        return tryitErrorResponse(404, "Component not found: " + componentId);
+    }
+    types:AccessScope scope = auth:buildAccessScope(projectId, componentId, environmentId);
+    boolean|error permitted = auth:hasAnyPermission(userContext.userId,
+            [auth:PERMISSION_INTEGRATION_EDIT, auth:PERMISSION_INTEGRATION_MANAGE], scope);
+    if permitted is error {
+        return tryitErrorResponse(500, "Authorization check failed: " + permitted.message());
+    }
+    if !permitted {
+        return tryitErrorResponse(403, "Access denied");
+    }
+
+    types:MiTryItTarget?|error target = storage:getMiTryItTarget(componentId, environmentId,
+        runtimeId, apiName);
+    if target is error {
+        return tryitErrorResponse(502, "Failed to resolve MI API: " + target.message());
+    }
+    if target is () {
+        return tryitErrorResponse(404, "No running MI API with that name was found for this component and environment");
+    }
+
+    string subPath = string:'join("/", ...restPath);
+    string rawPath = req.rawPath;
+    int? qIdx = rawPath.indexOf("?");
+    string query = qIdx is int ? rawPath.substring(qIdx) : "";
+    string context = target.context.startsWith("/") ? target.context : "/" + target.context;
+    string targetPath = context + (subPath == "" ? "" : (context.endsWith("/") ? subPath : "/" + subPath)) + query;
+
+    string|http:HeaderNotFoundError tryitHeaderName = req.getHeader("X-Tryit-Header-Name");
+    string|http:HeaderNotFoundError tryitHeaderValue = req.getHeader("X-Tryit-Header-Value");
+    req.removeHeader("X-Tryit-Header-Name");
+    req.removeHeader("X-Tryit-Header-Value");
+    req.removeHeader("Authorization");
+    if tryitHeaderName is string && tryitHeaderValue is string {
+        string trimmedName = tryitHeaderName.trim();
+        if trimmedName != "" && tryitHeaderValue != "" && BLOCKED_HEADER_NAMES.indexOf(trimmedName.toLowerAscii()) is () {
+            req.setHeader(trimmedName, tryitHeaderValue);
+        }
+    }
+
+    string baseUrl = storage:tryitScheme(target.protocol) + "://" + target.host + ":" + target.port.toString();
+    http:Client|error tryitClient = getTryitClient(baseUrl);
+    if tryitClient is error {
+        return tryitErrorResponse(502, "Failed to connect to MI runtime: " + tryitClient.message());
+    }
+    http:Response|error upstream = tryitClient->forward(targetPath, req);
+    if upstream is error {
+        log:printError("MI Try-It proxy forward failed", upstream, targetPath = targetPath, baseUrl = baseUrl);
+        return tryitErrorResponse(502, "MI API request failed: " + upstream.message());
+    }
+    return upstream;
+}
+
 @http:ServiceConfig {
     auth: [
         {
@@ -214,6 +281,54 @@ service /icp/tryit on httpListener {
     // Explicit per-method accessors (not 'default) so CORS preflight OPTIONS is auto-handled by
     // the listener and not subjected to service auth — same reasoning as workflow_proxy_service.
 
+    resource function get mi/[string componentId]/[string environmentId]/[string runtimeId]/[string apiName](http:Caller caller, http:Request req) returns error? {
+        check caller->respond(proxyMiTryItRequest(componentId, environmentId, runtimeId, apiName, [], req));
+    }
+
+    resource function get mi/[string componentId]/[string environmentId]/[string runtimeId]/[string apiName]/[string... restPath](http:Caller caller, http:Request req) returns error? {
+        check caller->respond(proxyMiTryItRequest(componentId, environmentId, runtimeId, apiName, restPath, req));
+    }
+
+    resource function post mi/[string componentId]/[string environmentId]/[string runtimeId]/[string apiName](http:Caller caller, http:Request req) returns error? {
+        check caller->respond(proxyMiTryItRequest(componentId, environmentId, runtimeId, apiName, [], req));
+    }
+
+    resource function post mi/[string componentId]/[string environmentId]/[string runtimeId]/[string apiName]/[string... restPath](http:Caller caller, http:Request req) returns error? {
+        check caller->respond(proxyMiTryItRequest(componentId, environmentId, runtimeId, apiName, restPath, req));
+    }
+
+    resource function put mi/[string componentId]/[string environmentId]/[string runtimeId]/[string apiName](http:Caller caller, http:Request req) returns error? {
+        check caller->respond(proxyMiTryItRequest(componentId, environmentId, runtimeId, apiName, [], req));
+    }
+
+    resource function put mi/[string componentId]/[string environmentId]/[string runtimeId]/[string apiName]/[string... restPath](http:Caller caller, http:Request req) returns error? {
+        check caller->respond(proxyMiTryItRequest(componentId, environmentId, runtimeId, apiName, restPath, req));
+    }
+
+    resource function patch mi/[string componentId]/[string environmentId]/[string runtimeId]/[string apiName](http:Caller caller, http:Request req) returns error? {
+        check caller->respond(proxyMiTryItRequest(componentId, environmentId, runtimeId, apiName, [], req));
+    }
+
+    resource function patch mi/[string componentId]/[string environmentId]/[string runtimeId]/[string apiName]/[string... restPath](http:Caller caller, http:Request req) returns error? {
+        check caller->respond(proxyMiTryItRequest(componentId, environmentId, runtimeId, apiName, restPath, req));
+    }
+
+    resource function delete mi/[string componentId]/[string environmentId]/[string runtimeId]/[string apiName](http:Caller caller, http:Request req) returns error? {
+        check caller->respond(proxyMiTryItRequest(componentId, environmentId, runtimeId, apiName, [], req));
+    }
+
+    resource function delete mi/[string componentId]/[string environmentId]/[string runtimeId]/[string apiName]/[string... restPath](http:Caller caller, http:Request req) returns error? {
+        check caller->respond(proxyMiTryItRequest(componentId, environmentId, runtimeId, apiName, restPath, req));
+    }
+
+    resource function head mi/[string componentId]/[string environmentId]/[string runtimeId]/[string apiName](http:Caller caller, http:Request req) returns error? {
+        check caller->respond(proxyMiTryItRequest(componentId, environmentId, runtimeId, apiName, [], req));
+    }
+
+    resource function head mi/[string componentId]/[string environmentId]/[string runtimeId]/[string apiName]/[string... restPath](http:Caller caller, http:Request req) returns error? {
+        check caller->respond(proxyMiTryItRequest(componentId, environmentId, runtimeId, apiName, restPath, req));
+    }
+
     resource function get [string componentId]/[string environmentId]/[string runtimeId]/[int port]/[string... restPath](http:Caller caller, http:Request req) returns error? {
         check caller->respond(proxyTryItRequest(componentId, environmentId, runtimeId, port, restPath, req));
     }
@@ -237,4 +352,5 @@ service /icp/tryit on httpListener {
     resource function head [string componentId]/[string environmentId]/[string runtimeId]/[int port]/[string... restPath](http:Caller caller, http:Request req) returns error? {
         check caller->respond(proxyTryItRequest(componentId, environmentId, runtimeId, port, restPath, req));
     }
+
 }

@@ -19,8 +19,8 @@
 import { Accordion, AccordionSummary, AccordionDetails, Box, Button, Card, CardContent, Chip, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle, Divider, Drawer, IconButton, Stack, Tooltip, Typography } from '@wso2/oxygen-ui';
 import SearchField from './SearchField';
 import { ChevronDown, Play, Square, X } from '@wso2/oxygen-ui-icons-react';
-import { useEffect, useMemo, useState } from 'react';
-import { useArtifactSource, useArtifactParams, useArtifactWsdl, useLocalEntryValue, useDataSourceOverview, useDataServiceOverview, useMessageProcessorOverview, ARTIFACT_TYPE_TO_SOURCE_TYPE } from '../api/queries';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useArtifactSource, useArtifactParams, useArtifactWsdl, useLocalEntryValue, useDataSourceOverview, useDataServiceOverview, useMessageProcessorOverview, useMiApiDetails, ARTIFACT_TYPE_TO_SOURCE_TYPE, type GqlMiApiDetails } from '../api/queries';
 import { WSDL_NS, SOAP_NS, SOAP12_NS } from '../paths';
 import CodeViewer from './CodeViewer';
 import { ListingTable, TablePagination } from '@wso2/oxygen-ui';
@@ -58,14 +58,198 @@ const getMethodBadgeSx = (method: string) =>
 
 const RESOURCE_LABEL_SX = { ...RESOURCE_LABEL_TEXT_SX, flex: 1, color: 'text.primary' } as const;
 
-function ResourceRow({ method, path }: { method: string; path: string }) {
+type JsonObject = Record<string, unknown>;
+
+interface OperationParameter {
+  name: string;
+  location: string;
+  required: boolean;
+  type?: string;
+  description?: string;
+  example?: string;
+}
+
+interface OperationResponse {
+  status: string;
+  description?: string;
+  contentTypes?: string[];
+  schema?: string;
+}
+
+interface OperationFlow {
+  inSequence?: string;
+  outSequence?: string;
+  faultSequence?: string;
+  inlineMediators: string[];
+}
+
+interface OperationDetails {
+  runtimeMetadata: Array<{ label: string; value: string }>;
+  summary?: string;
+  description?: string;
+  operationId?: string;
+  tags?: string[];
+  deprecated?: boolean;
+  security?: string[];
+  parameters: OperationParameter[];
+  requestBody?: { required: boolean; contentTypes: string[]; schema?: string };
+  responses: OperationResponse[];
+  flow?: OperationFlow;
+}
+
+const isObject = (value: unknown): value is JsonObject => typeof value === 'object' && value !== null && !Array.isArray(value);
+const asString = (value: unknown): string | undefined => (typeof value === 'string' || typeof value === 'number' ? String(value) : undefined);
+const asObject = (value: unknown): JsonObject => (isObject(value) ? value : {});
+const compactJson = (value: unknown): string | undefined => {
+  if (value === undefined || value === null) return undefined;
+  const ref = asObject(value).$ref;
+  if (typeof ref === 'string') return ref;
+  try {
+    const text = JSON.stringify(value);
+    return text && text.length > 600 ? `${text.slice(0, 597)}...` : text;
+  } catch {
+    return undefined;
+  }
+};
+
+function parseOperationDetails(details: GqlMiApiDetails | undefined, method: string, path: string): OperationDetails | undefined {
+  if (!details) return undefined;
+  let metadata: JsonObject = {};
+  let openApi: JsonObject = {};
+  try {
+    metadata = asObject(JSON.parse(details.metadata));
+    if (details.openApi) openApi = asObject(JSON.parse(details.openApi));
+  } catch {
+    // The raw documents remain available through Source when a runtime returns malformed data.
+  }
+
+  const paths = asObject(openApi.paths);
+  const normalizedPath = path.replace(/\/+$/, '') || '/';
+  const pathKey = Object.keys(paths).find((candidate) => (candidate.replace(/\/+$/, '') || '/') === normalizedPath);
+  const pathItem = asObject(pathKey ? paths[pathKey] : undefined);
+  const operation = asObject(pathItem[method.toLowerCase()]);
+  const swaggerParameters = Array.isArray(pathItem.parameters) ? pathItem.parameters : [];
+  const operationParameters = Array.isArray(operation.parameters) ? operation.parameters : [];
+  const parameters: OperationParameter[] = [...swaggerParameters, ...operationParameters].flatMap((raw) => {
+    const p = asObject(raw);
+    const name = asString(p.name);
+    const location = asString(p.in);
+    if (!name || !location) return [];
+    const schema = asObject(p.schema);
+    const type = asString(schema.type) ?? asString(p.type);
+    const example = asString(p.example) ?? asString(schema.example) ?? asString(p.default);
+    return [{ name, location, required: p.required === true, type, description: asString(p.description), example }];
+  });
+
+  let requestBody: OperationDetails['requestBody'];
+  const body = asObject(operation.requestBody);
+  const content = asObject(body.content);
+  if (Object.keys(content).length > 0) {
+    const firstSchema = asObject(content[Object.keys(content)[0]]).schema;
+    requestBody = { required: body.required === true, contentTypes: Object.keys(content), schema: compactJson(firstSchema) };
+  } else {
+    const bodyParameter = [...swaggerParameters, ...operationParameters].map(asObject).find((p) => p.in === 'body');
+    if (bodyParameter) {
+      requestBody = { required: bodyParameter.required === true, contentTypes: [], schema: compactJson(bodyParameter.schema) };
+    }
+  }
+
+  const rawResponses = asObject(operation.responses);
+  const responses = Object.entries(rawResponses).map(([status, raw]) => {
+    const response = asObject(raw);
+    const responseContent = asObject(response.content);
+    const responseSchema = Object.keys(responseContent).length > 0 ? asObject(responseContent[Object.keys(responseContent)[0]]).schema : response.schema;
+    return { status, description: asString(response.description), contentTypes: Object.keys(responseContent), schema: compactJson(responseSchema) };
+  });
+
+  const security = Array.isArray(operation.security) ? operation.security.flatMap((s) => Object.keys(asObject(s))) : [];
+  const flow = parseMiFlow(details.configuration, method, path);
+  const runtimeMetadata = ['context', 'version', 'port', 'url', 'tracing', 'stats'].flatMap((key) => {
+    const value = asString(metadata[key]);
+    return value ? [{ label: key, value }] : [];
+  });
+  const hasData = Object.keys(operation).length > 0 || parameters.length > 0 || responses.length > 0 || flow || runtimeMetadata.length > 0;
+  if (!hasData) return undefined;
+  return {
+    summary: asString(operation.summary),
+    description: asString(operation.description),
+    operationId: asString(operation.operationId),
+    tags: Array.isArray(operation.tags) ? operation.tags.map(asString).filter((v): v is string => !!v) : [],
+    deprecated: operation.deprecated === true,
+    security,
+    parameters,
+    requestBody,
+    responses,
+    flow,
+    runtimeMetadata,
+  };
+}
+
+function parseMiFlow(configuration: string | null, method: string, path: string): OperationFlow | undefined {
+  if (!configuration) return undefined;
+  try {
+    const doc = new DOMParser().parseFromString(configuration, 'text/xml');
+    if (doc.querySelector('parsererror')) return undefined;
+    const resources = Array.from(doc.getElementsByTagName('*')).filter((element) => element.localName === 'resource');
+    const normalizedPath = path.replace(/\/+$/, '') || '/';
+    const resource = resources.find((element) => {
+      const resourcePath = element.getAttribute('uri-template') ?? element.getAttribute('url-mapping') ?? '/';
+      const methods = (element.getAttribute('methods') ?? method).split(',').map((item) => item.trim().toUpperCase());
+      return (resourcePath.replace(/\/+$/, '') || '/') === normalizedPath && methods.includes(method.toUpperCase());
+    });
+    if (!resource) return undefined;
+    const sequenceName = (name: string) => resource?.getAttribute(name) ?? resource?.querySelector(name)?.getAttribute('key') ?? undefined;
+    const inlineMediators = Array.from(resource.children)
+      .filter((element) => !['inSequence', 'outSequence', 'faultSequence'].includes(element.localName))
+      .map((element) => element.localName);
+    return { inSequence: sequenceName('inSequence'), outSequence: sequenceName('outSequence'), faultSequence: sequenceName('faultSequence'), inlineMediators };
+  } catch {
+    return undefined;
+  }
+}
+
+function DetailLine({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <Stack direction="row" gap={1} alignItems="baseline">
+      <Typography variant="caption" color="text.secondary" sx={{ minWidth: 110 }}>{label}</Typography>
+      <Typography variant="body2" sx={{ fontFamily: 'monospace', wordBreak: 'break-word' }}>{children}</Typography>
+    </Stack>
+  );
+}
+
+function OperationDetailsPanel({ details, runtimeId, loading, error, errorMessage, onRetry }: { details?: OperationDetails; runtimeId?: string; loading?: boolean; error?: boolean; errorMessage?: string; onRetry?: () => void }) {
+  if (loading) return <Stack direction="row" gap={1} alignItems="center"><CircularProgress size={16} /><Typography variant="body2" color="text.secondary">Loading runtime metadata...</Typography></Stack>;
+  if (error) return <Stack direction="row" gap={1} alignItems="center" sx={{ flexWrap: 'wrap' }}><Typography variant="body2" color="error">{errorMessage ?? 'Unable to load runtime metadata.'}</Typography><Button size="small" onClick={onRetry}>Retry</Button></Stack>;
+  if (!details) return <Typography variant="body2" color="text.secondary">No detailed metadata available for this operation.</Typography>;
+  return (
+    <Stack gap={1.25}>
+      {runtimeId && <DetailLine label="Runtime">{runtimeId}</DetailLine>}
+      {details.runtimeMetadata.length > 0 && <Box><Typography variant="caption" color="text.secondary">MI metadata</Typography><Stack gap={0.5} sx={{ mt: 0.5 }}>{details.runtimeMetadata.map((item) => <DetailLine key={item.label} label={item.label}>{item.value}</DetailLine>)}</Stack></Box>}
+      {details.description && <Box><Typography variant="caption" color="text.secondary">Description</Typography><Typography variant="body2">{details.description}</Typography></Box>}
+      {(details.operationId || details.tags?.length || details.deprecated) && <DetailLine label="Operation">{[details.operationId, details.tags?.length ? `tags: ${details.tags.join(', ')}` : undefined, details.deprecated ? 'deprecated' : undefined].filter(Boolean).join(' · ')}</DetailLine>}
+      {details.parameters.length > 0 && <Box><Typography variant="caption" color="text.secondary">Parameters</Typography><Stack gap={0.5} sx={{ mt: 0.5 }}>{details.parameters.map((parameter) => <DetailLine key={`${parameter.location}-${parameter.name}`} label={`${parameter.location}${parameter.required ? ' *' : ''}`}>{parameter.name}{parameter.type ? ` (${parameter.type})` : ''}{parameter.example ? ` = ${parameter.example}` : ''}{parameter.description ? ` — ${parameter.description}` : ''}</DetailLine>)}</Stack></Box>}
+      {details.requestBody && <Box><Typography variant="caption" color="text.secondary">Request body</Typography><Stack gap={0.5} sx={{ mt: 0.5 }}><DetailLine label="Content">{details.requestBody.contentTypes.join(', ') || 'application/json'}{details.requestBody.required ? ' · required' : ''}</DetailLine>{details.requestBody.schema && <DetailLine label="Schema">{details.requestBody.schema}</DetailLine>}</Stack></Box>}
+      {details.responses.length > 0 && <Box><Typography variant="caption" color="text.secondary">Responses</Typography><Stack gap={0.5} sx={{ mt: 0.5 }}>{details.responses.map((response) => <DetailLine key={response.status} label={response.status}>{response.description ?? 'No description'}{response.contentTypes?.length ? ` · ${response.contentTypes.join(', ')}` : ''}{response.schema ? ` · ${response.schema}` : ''}</DetailLine>)}</Stack></Box>}
+      {details.security?.length ? <DetailLine label="Security">{details.security.join(', ')}</DetailLine> : null}
+      {details.flow && <Box><Typography variant="caption" color="text.secondary">MI Flow</Typography><Stack gap={0.5} sx={{ mt: 0.5 }}>{details.flow.inSequence && <DetailLine label="In sequence">{details.flow.inSequence}</DetailLine>}{details.flow.outSequence && <DetailLine label="Out sequence">{details.flow.outSequence}</DetailLine>}{details.flow.faultSequence && <DetailLine label="Fault sequence">{details.flow.faultSequence}</DetailLine>}{details.flow.inlineMediators.length > 0 && <DetailLine label="Inline mediators">{details.flow.inlineMediators.join(', ')}</DetailLine>}</Stack></Box>}
+    </Stack>
+  );
+}
+
+function ResourceRow({ method, path, details, runtimeId, loading, error, errorMessage, onRetry, onExpand }: { method: string; path: string; details?: OperationDetails; runtimeId?: string; loading?: boolean; error?: boolean; errorMessage?: string; onRetry?: () => void; onExpand?: () => void }) {
   const upperMethod = method.toUpperCase();
 
   return (
-    <Box sx={{ ...getResourceRowSx(upperMethod), flexWrap: 'wrap' }}>
-      <Box sx={getMethodBadgeSx(upperMethod)}>{upperMethod}</Box>
-      <Typography sx={RESOURCE_LABEL_SX}>{path}</Typography>
-    </Box>
+    <Accordion disableGutters onChange={(_, expanded) => expanded && onExpand?.()} sx={{ border: '0.5px solid', borderColor: getMethodBadgeColor(upperMethod), borderRadius: 0.5, '&:before': { display: 'none' } }}>
+      <AccordionSummary expandIcon={<ChevronDown size={16} />} sx={{ minHeight: 42, px: 1, py: 0, '& .MuiAccordionSummary-content': { my: 0.75 } }}>
+        <Box sx={{ ...getResourceRowSx(upperMethod), border: 0, p: 0, width: '100%' }}>
+          <Box sx={getMethodBadgeSx(upperMethod)}>{upperMethod}</Box>
+          <Typography sx={RESOURCE_LABEL_SX}>{path}</Typography>
+          {details?.summary && <Typography variant="caption" color="text.secondary" sx={{ mr: 1, maxWidth: '45%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{details.summary}</Typography>}
+        </Box>
+      </AccordionSummary>
+      <AccordionDetails sx={{ bgcolor: 'background.paper', px: 1.5, py: 1.25 }}><OperationDetailsPanel details={details} runtimeId={runtimeId} loading={loading} error={error} errorMessage={errorMessage} onRetry={onRetry} /></AccordionDetails>
+    </Accordion>
   );
 }
 
@@ -79,7 +263,7 @@ export function ArtifactSource({ envId, componentId, artifactType, artifact }: T
   return <CodeViewer code={source} language="xml" />;
 }
 
-export function ArtifactApiDefinition({ artifact }: TabProps) {
+export function ArtifactApiDefinition({ artifact, envId, componentId }: TabProps) {
   const resources = (artifact.resources as Array<{ path?: string; methods?: string }> | undefined) ?? [];
   const context = (artifact.context ?? '/*').toString();
   const items = resources.length === 0 ? [{ methods: 'POST', path: context }] : resources;
@@ -94,10 +278,21 @@ export function ArtifactApiDefinition({ artifact }: TabProps) {
     });
   });
 
+  const runtimes = (artifact.runtimes as Array<{ runtimeId: string; status: string }> | undefined) ?? [];
+  const runtimeId = runtimes.find((runtime) => runtime.status === 'RUNNING')?.runtimeId;
+  const [detailsRequested, setDetailsRequested] = useState(false);
+  const apiName = artifact.name?.toString() ?? '';
+  const { data: liveDetails, isLoading, error, refetch } = useMiApiDetails(componentId, envId, apiName, detailsRequested ? runtimeId : undefined);
+  const parsedDetails = useMemo(() => {
+    const result = new Map<string, OperationDetails | undefined>();
+    expandedItems.forEach((item) => result.set(`${item.method}:${item.path}`, parseOperationDetails(liveDetails, item.method, item.path)));
+    return result;
+  }, [expandedItems, liveDetails]);
+
   return (
     <Stack gap={0.75}>
       {expandedItems.map((item, i) => (
-        <ResourceRow key={i} method={item.method} path={item.path} />
+        <ResourceRow key={i} method={item.method} path={item.path} details={parsedDetails.get(`${item.method}:${item.path}`)} runtimeId={liveDetails?.runtimeId} loading={detailsRequested && isLoading} error={detailsRequested && !!error} errorMessage={error instanceof Error ? error.message : undefined} onRetry={() => void refetch()} onExpand={() => setDetailsRequested(true)} />
       ))}
     </Stack>
   );

@@ -23,17 +23,50 @@ import { visualizer } from 'rollup-plugin-visualizer';
 // https://vite.dev/config/
 export default defineConfig({
   base: '/',
+  server: {
+    proxy: {
+      '/api/graphql': {
+        target: 'https://localhost:9446',
+        changeOrigin: true,
+        secure: false,
+        rewrite: (path) => path.replace(/^\/api/, ''),
+      },
+      '/api/auth': {
+        target: 'https://localhost:9446',
+        changeOrigin: true,
+        secure: false,
+        rewrite: (path) => path.replace(/^\/api/, ''),
+      },
+      '/api/icp': {
+        target: 'https://localhost:9446',
+        changeOrigin: true,
+        secure: false,
+        rewrite: (path) => path.replace(/^\/api/, ''),
+      },
+      '/api/runtime-status': {
+        target: 'wss://localhost:9446',
+        changeOrigin: true,
+        secure: false,
+        ws: true,
+        rewrite: (path) => path.replace(/^\/api/, ''),
+      },
+    },
+  },
   build: {
     outDir: 'dist',
     emptyOutDir: true,
   },
   plugins: [
     react(),
-    visualizer({
-      open: false,
-      filename: 'dist/stats.html',
-      gzipSize: true,
-      brotliSize: true,
-    }),
+    ...(process.env.ANALYZE === 'true'
+      ? [
+          visualizer({
+            open: false,
+            filename: 'dist/stats.html',
+            gzipSize: true,
+            brotliSize: true,
+          }),
+        ]
+      : []),
   ],
 });

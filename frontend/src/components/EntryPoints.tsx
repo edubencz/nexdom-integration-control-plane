@@ -164,18 +164,21 @@ function EntryPointDetail({ selected, onOpenDrawerTab }: { selected: SelectedArt
   const hasRuntimes = artifact.runtimes && Array.isArray(artifact.runtimes) && artifact.runtimes.length > 0;
   const artifactRuntimes = (artifact.runtimes as Array<{ runtimeId: string; status: string }> | undefined) ?? [];
   const showApiDocsButton = artifactType === 'Service' && Boolean(hasRuntimes);
+  const showTestButton = artifactType === 'Service' || artifactType === 'RestApi';
   // A Service can have multiple runtime instances (e.g. one per environment/replica); they all
   // run the same deployed code, so any instance's packed OpenAPI docs are representative. Prefer
   // a RUNNING one so the "Try it out" requests in the drawer have somewhere to actually land.
   const apiDocsRuntimeId = artifactRuntimes.find((r) => r.status === 'RUNNING')?.runtimeId ?? artifactRuntimes[0]?.runtimeId;
+  const testRuntimeId = artifactRuntimes.find((r) => r.status === 'RUNNING')?.runtimeId;
   const [viewingApiDocs, setViewingApiDocs] = useState(false);
 
   // Track if any preceding controls are visible for proper divider placement
   const hasPrecedingControls = compositeApp || showStatusToggle || showStatusChip || showTracingToggle || showStatisticsToggle || showListenerToggle;
   const hasHeaderControls =
-    !!compositeApp || showStatusChip || showStatusToggle || showTracingToggle || showStatisticsToggle || showListenerToggle || showParametersButton || showWsdlButton || showTaskToggle || showTaskTrigger || (showApiDocsButton && !!apiDocsRuntimeId);
+    !!compositeApp || showStatusChip || showStatusToggle || showTracingToggle || showStatisticsToggle || showListenerToggle || showParametersButton || showWsdlButton || showTaskToggle || showTaskTrigger || (showApiDocsButton && !!apiDocsRuntimeId) || (showTestButton && !!testRuntimeId);
 
   const artifactName = artifactType === 'Automation' ? (artifact.packageName?.toString() ?? '') : (artifact.name?.toString() ?? '');
+  const testQueryParam = artifactType === 'RestApi' ? 'api' : 'service';
   const artifactKey = `${artifactType}-${artifactName}`;
   useEffect(() => {
     setTracingEnabled(toEnabled(artifact.tracing));
@@ -459,16 +462,20 @@ function EntryPointDetail({ selected, onOpenDrawerTab }: { selected: SelectedArt
                 View WSDL
               </Button>
             )}
-            {showApiDocsButton && apiDocsRuntimeId && (
+            {((showApiDocsButton && apiDocsRuntimeId) || (showTestButton && testRuntimeId)) && (
               <Stack direction="row" gap={1} sx={{ ml: 'auto' }}>
-                <Authorized permissions={[Permissions.INTEGRATION_EDIT, Permissions.INTEGRATION_MANAGE]}>
-                  <Button variant="outlined" size="small" startIcon={<FlaskConical size={14} />} onClick={() => navigate(`${resourceUrl(scope, 'test')}?service=${encodeURIComponent(artifactName)}&env=${encodeURIComponent(envId)}`)}>
-                    Test
+                {showTestButton && testRuntimeId && (
+                  <Authorized permissions={[Permissions.INTEGRATION_EDIT, Permissions.INTEGRATION_MANAGE]}>
+                    <Button variant="outlined" size="small" startIcon={<FlaskConical size={14} />} onClick={() => navigate(`${resourceUrl(scope, 'test')}?${testQueryParam}=${encodeURIComponent(artifactName)}&env=${encodeURIComponent(envId)}`)}>
+                      Test
+                    </Button>
+                  </Authorized>
+                )}
+                {showApiDocsButton && (
+                  <Button variant="contained" size="small" startIcon={<BookOpen size={14} />} onClick={() => setViewingApiDocs(true)}>
+                    View API Docs
                   </Button>
-                </Authorized>
-                <Button variant="contained" size="small" startIcon={<BookOpen size={14} />} onClick={() => setViewingApiDocs(true)}>
-                  View API Docs
-                </Button>
+                )}
               </Stack>
             )}
           </Stack>
@@ -1106,7 +1113,7 @@ export default function Environment({
         {(componentType !== 'MI' || viewMode === 'entryPoints') && (
           <EntryPointsList envId={env.id} componentId={componentId} projectId={projectId} componentType={componentType} displayType={displayType} isOnline={isOnline} onOpenDrawer={onOpenDrawerForTab} onSelectionChange={setCurrentEntryPoint} />
         )}
-        {componentType === 'MI' && viewMode === 'allArtifacts' && <ArtifactTypeSelector envId={env.id} componentId={componentId} onSelectArtifact={onSelectArtifact} />}
+        {componentType === 'MI' && viewMode === 'allArtifacts' && <ArtifactTypeSelector envId={env.id} projectId={projectId} componentId={componentId} onSelectArtifact={onSelectArtifact} />}
       </CardContent>
     </Card>
   );

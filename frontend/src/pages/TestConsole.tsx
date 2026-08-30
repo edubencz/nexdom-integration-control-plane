@@ -19,12 +19,12 @@ import { lazy, Suspense, useEffect, useMemo, useState, type JSX } from 'react';
 import { useSearchParams } from 'react-router';
 import { Alert, Autocomplete, Box, CircularProgress, Divider, IconButton, InputAdornment, OutlinedInput, PageContent, Stack, TextField, Tooltip, Typography } from '@wso2/oxygen-ui';
 import { Eye, EyeOff } from '@wso2/oxygen-ui-icons-react';
-import { useProjectByHandler, useComponentByHandler, useEnvironments, useArtifacts, useOpenApiDefinitionsByRuntime, type GqlArtifact } from '../api/queries';
+import { useProjectByHandler, useComponentByHandler, useEnvironments, useArtifacts, useOpenApiDefinitionsByRuntime, useMiApiDetails, type GqlArtifact } from '../api/queries';
 import NotFound from '../components/NotFound';
 import Authorized from '../components/Authorized';
 import CopyButton from '../components/CopyButton';
 import { matchesServiceBasePath } from '../utils/openApiMatching';
-import { tryitApiUrl } from '../config/api';
+import { miTryitApiUrl, tryitApiUrl } from '../config/api';
 import { Permissions } from '../constants/permissions';
 import { resourceUrl, broaden, type ComponentScope } from '../nav';
 
@@ -67,6 +67,11 @@ function pickListenerPort(artifact: GqlArtifact | null): number | null {
   return listener?.port ?? null;
 }
 
+function pickApiContext(artifact: GqlArtifact | null): string {
+  const context = artifact?.context?.toString() ?? '';
+  return context ? (context.startsWith('/') ? context : `/${context}`) : '';
+}
+
 // Builds the Try-It proxy URL for the selected service on the selected runtime instance — the
 // only invocable address is now resolved server-side (icp_server's tryit_proxy_service.bal),
 // since the runtime's own listener host is frequently unusable from the browser (bind-all
@@ -88,7 +93,9 @@ export default function TestConsole(scope: ComponentScope): JSX.Element {
   const componentId = component?.id ?? '';
   const { data: environments = [], isLoading: loadingEnvs } = useEnvironments(projectId);
 
-  // Deep-link params (e.g. from EntryPoints.tsx's "Test" action): ?service=<name>&env=<environmentId>
+  const isMi = component?.componentType === 'MI';
+  // Deep-link params: ?service=<name> for BI and ?api=<name> for MI. Accept both
+  // names while the component is still loading so a deep link cannot be lost.
   const [searchParams] = useSearchParams();
   const [selectedEnvId, setSelectedEnvId] = useState(searchParams.get('env') ?? '');
   useEffect(() => {
@@ -97,8 +104,9 @@ export default function TestConsole(scope: ComponentScope): JSX.Element {
   }, [environments]);
   const selectedEnv = environments.find((e) => e.id === selectedEnvId) ?? null;
 
-  const { data: services = [], isLoading: loadingServices } = useArtifacts('Service', selectedEnvId, componentId);
-  const [selectedServiceName, setSelectedServiceName] = useState(searchParams.get('service') ?? '');
+  const artifactType = isMi ? 'RestApi' : 'Service';
+  const { data: services = [], isLoading: loadingServices } = useArtifacts(artifactType, selectedEnvId, componentId);
+  const [selectedServiceName, setSelectedServiceName] = useState(searchParams.get('api') ?? searchParams.get('service') ?? '');
   useEffect(() => {
     if (!services.length) return;
     setSelectedServiceName((prev) => (prev && services.some((s) => s.name === prev) ? prev : services[0].name));
@@ -115,23 +123,32 @@ export default function TestConsole(scope: ComponentScope): JSX.Element {
   const runtimeOptions = runningRuntimes(selectedService);
   const selectedRuntime = runtimeOptions.find((r) => r.runtimeId === selectedRuntimeId) ?? null;
 
-  const invokeUrl = useMemo(() => computeInvokeUrl(componentId, selectedEnvId, selectedRuntime?.runtimeId ?? '', selectedService), [componentId, selectedEnvId, selectedRuntime, selectedService]);
+  const invokeUrl = useMemo(() => {
+    const runtimeId = selectedRuntime?.runtimeId ?? '';
+    if (!runtimeId || !selectedService) return '';
+    if (isMi) return miTryitApiUrl(componentId, selectedEnvId, runtimeId, selectedService.name);
+    return computeInvokeUrl(componentId, selectedEnvId, runtimeId, selectedService);
+  }, [componentId, selectedEnvId, selectedRuntime, selectedService, isMi]);
 
   const [headerName, setHeaderName] = useState('Authorization');
   const [headerValue, setHeaderValue] = useState('');
   const [showHeaderValue, setShowHeaderValue] = useState(false);
 
-  const { data: allDefinitions = [], isLoading: loadingDefs, error: defsError } = useOpenApiDefinitionsByRuntime(selectedRuntimeId, !!selectedRuntimeId);
-  const basePath = selectedService?.basePath?.toString() ?? '';
+  const { data: allDefinitions = [], isLoading: loadingBiDefs, error: biDefsError } = useOpenApiDefinitionsByRuntime(selectedRuntimeId, !isMi && !!selectedRuntimeId);
+  const { data: miDetails, isLoading: loadingMiDetails, error: miDetailsError } = useMiApiDetails(componentId, selectedEnvId, selectedServiceName, isMi ? selectedRuntimeId : undefined);
+  const basePath = isMi ? pickApiContext(selectedService) : selectedService?.basePath?.toString() ?? '';
   const definition = useMemo(() => allDefinitions.find((d) => matchesServiceBasePath(d.fileName, basePath)), [allDefinitions, basePath]);
   const parsedSpec = useMemo(() => {
-    if (!definition) return { spec: null, error: null as string | null };
+    const rawDefinition = isMi ? miDetails?.openApi : definition?.definition;
+    if (!rawDefinition) return { spec: null, error: null as string | null };
     try {
-      return { spec: JSON.parse(definition.definition) as object, error: null };
+      return { spec: JSON.parse(rawDefinition) as object, error: null };
     } catch {
       return { spec: null, error: 'Could not parse this OpenAPI definition as JSON.' };
     }
-  }, [definition]);
+  }, [definition, isMi, miDetails?.openApi]);
+  const loadingDefs = isMi ? loadingMiDetails : loadingBiDefs;
+  const defsError = isMi ? miDetailsError : biDefsError;
 
   if (loadingProject || loadingComponent || loadingEnvs) {
     return (
@@ -148,7 +165,7 @@ export default function TestConsole(scope: ComponentScope): JSX.Element {
         Test Console
       </Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-        Send test requests to <strong>{component.displayName ?? scope.component}</strong>&apos;s services.
+        Send test requests to <strong>{component.displayName ?? scope.component}</strong>&apos;s {isMi ? 'APIs' : 'services'}.
       </Typography>
 
       <Authorized
@@ -178,7 +195,7 @@ export default function TestConsole(scope: ComponentScope): JSX.Element {
 
           <Stack direction="row" alignItems="center" gap={2}>
             <Typography variant="body2" sx={{ minWidth: 120, fontWeight: 500, color: 'text.secondary' }}>
-              Service
+              {isMi ? 'API' : 'Service'}
             </Typography>
             {loadingServices ? (
               <CircularProgress size={20} />
@@ -187,14 +204,14 @@ export default function TestConsole(scope: ComponentScope): JSX.Element {
                 size="small"
                 sx={{ minWidth: 320 }}
                 options={services}
-                getOptionLabel={serviceLabel}
+                getOptionLabel={isMi ? (api) => api.name : serviceLabel}
                 renderOption={(props, s) => (
                   <Box component="li" {...props} key={s.name}>
                     <Stack>
                       <Typography variant="body2">{s.name}</Typography>
-                      {s.basePath?.toString() && (
+                      {(isMi ? pickApiContext(s) : s.basePath?.toString()) && (
                         <Typography variant="caption" color="text.secondary" sx={{ fontFamily: 'monospace' }}>
-                          {s.basePath.toString()}
+                          {isMi ? pickApiContext(s) : s.basePath?.toString()}
                         </Typography>
                       )}
                     </Stack>
@@ -268,11 +285,11 @@ export default function TestConsole(scope: ComponentScope): JSX.Element {
           </Alert>
         ) : !selectedService ? (
           <Typography color="text.secondary" sx={{ py: 4 }}>
-            No services found for this environment.
+            No {isMi ? 'APIs' : 'services'} found for this environment.
           </Typography>
         ) : !selectedRuntimeId ? (
           <Typography color="text.secondary" sx={{ py: 4 }}>
-            No running runtime instance found for this service.
+            No running runtime instance found for this {isMi ? 'API' : 'service'}.
           </Typography>
         ) : parsedSpec.error ? (
           <Alert severity="warning" sx={{ maxWidth: 820 }}>
@@ -280,7 +297,7 @@ export default function TestConsole(scope: ComponentScope): JSX.Element {
           </Alert>
         ) : !parsedSpec.spec ? (
           <Typography color="text.secondary" sx={{ py: 4 }}>
-            No OpenAPI definition packed for this service yet.
+            No OpenAPI definition available for this {isMi ? 'API' : 'service'} yet.
           </Typography>
         ) : (
           <Suspense

@@ -476,6 +476,13 @@ export interface GqlArtifact {
   [key: string]: unknown;
 }
 
+export interface GqlMiApiDetails {
+  runtimeId: string;
+  metadata: string;
+  openApi: string | null;
+  configuration: string | null;
+}
+
 // Maps artifactType to its GraphQL query field name and useful display fields
 // `fields` = flat scalar fields, `gqlFields` = full GraphQL selection (including nested)
 // fields = card columns, gqlFields = full GraphQL selection (including nested)
@@ -658,6 +665,28 @@ export function useArtifactSource(envId: string, componentId: string, artifactTy
         templateType,
       }).then((d) => d.artifactSourceByComponent),
     enabled: !!envId && !!componentId && !!artifactType && !!artifactName,
+  });
+}
+
+const MI_API_DETAILS_QUERY = `
+  query MiApiDetails($componentId: String!, $apiName: String!, $environmentId: String!, $runtimeId: String) {
+    miApiDetailsByComponent(componentId: $componentId, apiName: $apiName, environmentId: $environmentId, runtimeId: $runtimeId) {
+      runtimeId, metadata, openApi, configuration
+    }
+  }`;
+
+export function useMiApiDetails(componentId: string, environmentId: string, apiName: string, runtimeId?: string) {
+  return useQuery({
+    queryKey: ['miApiDetails', componentId, environmentId, apiName, runtimeId],
+    queryFn: () =>
+      gql<{ miApiDetailsByComponent: GqlMiApiDetails }>(MI_API_DETAILS_QUERY, {
+        componentId,
+        environmentId,
+        apiName,
+        runtimeId: runtimeId || undefined,
+      }).then((d) => d.miApiDetailsByComponent),
+    enabled: !!componentId && !!environmentId && !!apiName && !!runtimeId,
+    staleTime: 5 * 60 * 1000,
   });
 }
 
@@ -947,6 +976,10 @@ export function useLogFileContent(runtimeId: string, fileName: string, enabled =
       }).then((d) => d.logFileContent),
     enabled: enabled && !!runtimeId && !!fileName,
   });
+}
+
+export function fetchLogFileContent(runtimeId: string, fileName: string): Promise<string> {
+  return gql<{ logFileContent: string }>(LOG_FILE_CONTENT_QUERY, { runtimeId, fileName }).then((d) => d.logFileContent);
 }
 
 // ── OpenAPI Definitions ──

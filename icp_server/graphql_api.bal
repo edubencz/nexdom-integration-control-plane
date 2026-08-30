@@ -3361,6 +3361,58 @@ service /graphql on graphqlListener {
         return artifactDetails;
     }
 
+    // Fetch live MI API metadata, OpenAPI and Synapse configuration for expandable Entry Point
+    // operations. This is intentionally read-only and supports users with view permission.
+    isolated resource function get miApiDetailsByComponent(
+            graphql:Context context,
+            string componentId,
+            string apiName,
+            string environmentId,
+            string? runtimeId = ()
+    ) returns types:MiApiDetails|error {
+        types:UserContextV2 userContext = check extractUserContext(context);
+        types:Component? component = check storage:getComponentById(componentId);
+        if component is () {
+            return error("Integration not found");
+        }
+        types:AccessScope scope = auth:buildScopeFromContext(component.projectId, integrationId = componentId,
+            envId = environmentId);
+        if !check auth:hasAnyPermission(userContext.userId,
+                [auth:PERMISSION_INTEGRATION_VIEW, auth:PERMISSION_INTEGRATION_EDIT,
+                auth:PERMISSION_INTEGRATION_MANAGE], scope) {
+            return error("Insufficient permissions to view component artifacts");
+        }
+
+        types:Runtime[] runtimes = check storage:getRuntimes("RUNNING", "MI", environmentId,
+            component.projectId, componentId);
+        types:Runtime runtime = check utils:selectRuntime(runtimes, componentId, environmentId, runtimeId);
+        string baseUrl = check storage:buildManagementBaseUrl(runtime.managementHostname,
+            runtime.managementPort);
+        http:Client|error clientResult = artifactsApiAllowInsecureTLS
+            ? new (baseUrl, {secureSocket: {enable: false}})
+            : new (baseUrl);
+        if clientResult is error {
+            return error(string `Failed to create management API client: ${clientResult.message()}`);
+        }
+        string token = check storage:issueRuntimeHmacToken(runtime.runtimeId);
+        types:MgmtRestApiInfo apiInfo = check mi_management:fetchApiArtifact(clientResult, token, apiName);
+        string? swagger = ();
+        string|error swaggerResult = mi_management:fetchApiSwagger(runtime, componentId, environmentId,
+            apiInfo, artifactsApiAllowInsecureTLS);
+        if swaggerResult is string {
+            swagger = swaggerResult;
+        } else {
+            log:printDebug("OpenAPI document unavailable; returning MI metadata and configuration",
+                runtimeId = runtime.runtimeId, apiName = apiName, errorMessage = swaggerResult.message());
+        }
+        return {
+            runtimeId: runtime.runtimeId,
+            metadata: apiInfo.toJson().toJsonString(),
+            openApi: swagger,
+            configuration: apiInfo.configuration ?: ()
+        };
+    }
+
     // Get WSDL for any supported artifact by type and name via ICP internal API
     // Currently only supported for proxy services, but can be extended to other artifact types in the future if needed (e.g. APIs with OAS)
     isolated resource function get artifactWsdlByComponent(
@@ -4154,4 +4206,3 @@ service /graphql on graphqlListener {
     }
 
 }
-

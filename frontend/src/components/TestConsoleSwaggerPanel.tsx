@@ -82,7 +82,7 @@ export default function TestConsoleSwaggerPanel({ spec, invokeUrl, headerName, h
   if (!invokeUrl) {
     return (
       <Alert severity="warning" sx={{ m: 2 }}>
-        Could not determine an invoke URL for this service (no running runtime instance or listener port reported yet) — requests sent from "Try it out" won't have anywhere to land.
+        Could not determine an invoke URL for this API (no running runtime instance or listener port reported yet) — requests sent from "Try it out" won't have anywhere to land.
       </Alert>
     );
   }

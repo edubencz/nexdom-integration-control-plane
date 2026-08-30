@@ -175,6 +175,8 @@ function updateFrontendConfig() returns error? {
         "VITE_OBSERVABILITY_URL": backendObservabilityEndpoint,
         "VITE_WORKFLOW_URL": backendWorkflowEndpoint,
         "VITE_TRYIT_URL": backendTryitEndpoint,
+        "VITE_MI_APPLICATIONS_URL": backendMiApplicationsEndpoint,
+        "VITE_MI_SERVER_URL": backendMiServerEndpoint,
         "VITE_WS_URL": backendWsUrl,
         "VITE_SSO_ENABLED": ssoEnabled,
         "VITE_SSO_ISSUER": ssoIssuer,

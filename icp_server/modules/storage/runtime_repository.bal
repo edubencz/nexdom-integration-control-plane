@@ -373,6 +373,49 @@ public isolated function getTryItTarget(string componentId, string environmentId
     return {host: rows[0].host, protocol: rows[0].protocol};
 }
 
+// Resolves an MI API target from ICP-owned runtime/artifact records. The host is
+// always the registered runtime hostname; the API URL contributes only scheme
+// and port, so a browser cannot redirect the proxy to an arbitrary destination.
+public isolated function getMiTryItTarget(string componentId, string environmentId, string runtimeId,
+        string apiName) returns types:MiTryItTarget?|error {
+    stream<record {|string? host; string api_url; string? context;|}, sql:Error?> rs = dbClient->query(`
+        SELECT r.runtime_hostname AS host, a.url AS api_url, a.context AS context
+        FROM runtimes r
+        JOIN mi_api_artifacts a ON a.runtime_id = r.runtime_id
+        WHERE r.runtime_id = ${runtimeId} AND r.component_id = ${componentId}
+            AND r.environment_id = ${environmentId} AND r.runtime_type = 'MI'
+            AND r.status = 'RUNNING' AND a.api_name = ${apiName}
+    `);
+    record {|string? host; string api_url; string? context;|}[] rows = check from var r in rs
+        limit 1
+        select r;
+    if rows.length() == 0 || rows[0].host is () {
+        return ();
+    }
+    string apiUrl = rows[0].api_url;
+    int? schemeEnd = apiUrl.indexOf("://");
+    if schemeEnd is () {
+        return error("Invalid MI API URL");
+    }
+    string protocol = apiUrl.substring(0, schemeEnd).toLowerAscii();
+    if protocol != "http" && protocol != "https" {
+        return error("Unsupported MI API URL scheme");
+    }
+    int? pathStart = apiUrl.indexOf("/", schemeEnd + 3);
+    if pathStart is () {
+        return error("Invalid MI API URL (missing path)");
+    }
+    string authority = apiUrl.substring(schemeEnd + 3, pathStart);
+    int? separator = authority.lastIndexOf(":");
+    string portText = separator is int ? authority.substring(separator + 1) : "";
+    int port = portText == "" ? (protocol == "https" ? 443 : 80) : check int:fromString(portText);
+    if port < 1 || port > 65535 {
+        return error("Invalid MI API listener port");
+    }
+    string context = rows[0].context ?: apiUrl.substring(pathStart);
+    return {host: rows[0].host ?: "", protocol, port, context};
+}
+
 // Base URLs (scheme://host:port) of RUNNING runtimes' registered listeners with a usable
 // try_it_host — used by the offline-runtime scheduler to prune the Try-It proxy's http:Client
 // cache, mirroring getRunningWorkflowCallbackUrls. Built in Ballerina rather than SQL since
@@ -386,7 +429,45 @@ public isolated function getLiveTryItBaseUrls() returns string[]|error {
     stream<record {|string host; int port; string protocol;|}, sql:Error?> rs = dbClient->query(query);
     record {|string host; int port; string protocol;|}[] rows = check from var r in rs
         select r;
-    return rows.map(r => tryitScheme(r.protocol) + "://" + r.host + ":" + r.port.toString());
+    string[] liveUrls = rows.map(r => tryitScheme(r.protocol) + "://" + r.host + ":" + r.port.toString());
+
+    // MI listeners are represented by the URL on each API artifact rather than
+    // by bi_runtime_listener_artifacts. Include their reachable bases so the
+    // proxy client cache is pruned consistently for both runtime types.
+    stream<record {|string? host; string api_url;|}, sql:Error?> miRs = dbClient->query(`
+        SELECT DISTINCT r.runtime_hostname AS host, a.url AS api_url
+        FROM runtimes r
+        JOIN mi_api_artifacts a ON a.runtime_id = r.runtime_id
+        WHERE r.runtime_type = 'MI' AND r.status = 'RUNNING'
+    `);
+    record {|string? host; string api_url;|}[] miRows = check from var r in miRs
+        select r;
+    foreach var row in miRows {
+        if row.host is () {
+            continue;
+        }
+        int? schemeEnd = row.api_url.indexOf("://");
+        if schemeEnd is () {
+            continue;
+        }
+        string protocol = row.api_url.substring(0, schemeEnd).toLowerAscii();
+        if protocol != "http" && protocol != "https" {
+            continue;
+        }
+        int? pathStart = row.api_url.indexOf("/", schemeEnd + 3);
+        if pathStart is () {
+            continue;
+        }
+        string authority = row.api_url.substring(schemeEnd + 3, pathStart);
+        int? separator = authority.lastIndexOf(":");
+        string portText = separator is int ? authority.substring(separator + 1) : "";
+        int port = portText == "" ? (protocol == "https" ? 443 : 80) : check int:fromString(portText);
+        if port >= 1 && port <= 65535 {
+            string host = row.host ?: "";
+            liveUrls.push(protocol + "://" + host + ":" + port.toString());
+        }
+    }
+    return liveUrls;
 }
 
 type ApiRecordInDB record {|
