@@ -1004,7 +1004,13 @@ export function ArtifactDetail({ selected, onClose }: { selected: SelectedArtifa
             </Stack>
           );
         }
-        return <RegistryBrowser runtimeId={runtimeId} />;
+        return <RegistryBrowser
+          runtimeId={runtimeId}
+          componentId={componentId}
+          environmentId={envId}
+          projectId={selected.projectId}
+          runtimes={(artifact.runtimes as Array<{ runtimeId: string; runtimeName?: string; status?: string }> | undefined) ?? []}
+        />;
       }
       default:
         return null;

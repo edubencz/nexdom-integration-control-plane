@@ -30,6 +30,7 @@ interface RuntimeConfig {
   VITE_TRYIT_URL?: string;
   VITE_MI_APPLICATIONS_URL?: string;
   VITE_MI_SERVER_URL?: string;
+  VITE_MI_REGISTRY_URL?: string;
   VITE_WS_URL?: string;
   VITE_SSO_ENABLED?: boolean;
   VITE_SSO_ISSUER?: string;
@@ -46,6 +47,7 @@ export interface ApiConfig {
   tryitUrl: string;
   miApplicationsUrl: string;
   miServerUrl: string;
+  miRegistryUrl: string;
   wsUrl: string;
   ssoEnabled: boolean;
   ssoIssuer: string;
@@ -70,6 +72,7 @@ const DEFAULT_CONFIG: ApiConfig = {
   tryitUrl: 'https://localhost:9446/icp/tryit',
   miApplicationsUrl: 'https://localhost:9446/icp/mi_applications',
   miServerUrl: 'https://localhost:9446/icp/mi_server',
+  miRegistryUrl: 'https://localhost:9446/icp/mi_registry',
   wsUrl: 'wss://localhost:9446/runtime-status',
   ssoEnabled: false,
   ssoIssuer: '',
@@ -99,6 +102,7 @@ export async function loadConfig(): Promise<void> {
       tryitUrl: config.VITE_TRYIT_URL || DEFAULT_CONFIG.tryitUrl,
       miApplicationsUrl: config.VITE_MI_APPLICATIONS_URL || DEFAULT_CONFIG.miApplicationsUrl,
       miServerUrl: config.VITE_MI_SERVER_URL || DEFAULT_CONFIG.miServerUrl,
+      miRegistryUrl: config.VITE_MI_REGISTRY_URL || DEFAULT_CONFIG.miRegistryUrl,
       wsUrl: config.VITE_WS_URL || DEFAULT_CONFIG.wsUrl,
       ssoEnabled: config.VITE_SSO_ENABLED ?? DEFAULT_CONFIG.ssoEnabled,
       ssoIssuer: config.VITE_SSO_ISSUER || DEFAULT_CONFIG.ssoIssuer,
@@ -165,3 +169,9 @@ export const miApplicationsApiUrl = (componentId: string, environmentId: string,
 
 export const miServerApiUrl = (componentId: string, environmentId: string, runtimeId: string): string =>
   `${window.API_CONFIG.miServerUrl.replace(/\/+$/, '')}/${encodeURIComponent(componentId)}/${encodeURIComponent(environmentId)}/${encodeURIComponent(runtimeId)}`;
+
+export const miRegistryApiUrl = (componentId: string, environmentId: string, runtimeId: string, resource: 'content' | 'properties', query: Record<string, string> = {}): string => {
+  const params = new URLSearchParams(query);
+  const suffix = params.toString() ? `?${params.toString()}` : '';
+  return `${window.API_CONFIG.miRegistryUrl.replace(/\/+$/, '')}/${encodeURIComponent(componentId)}/${encodeURIComponent(environmentId)}/${encodeURIComponent(runtimeId)}/${resource}${suffix}`;
+};

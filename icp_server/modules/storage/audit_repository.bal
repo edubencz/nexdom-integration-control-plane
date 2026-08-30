@@ -91,6 +91,10 @@ public const string AUDIT_ORG_SECRET_REVOKE = "ORG_SECRET_REVOKE";
 // MI runtime user events
 public const string AUDIT_MI_USER_CREATE = "MI_USER_CREATE";
 public const string AUDIT_MI_USER_DELETE = "MI_USER_DELETE";
+public const string AUDIT_REGISTRY_RESOURCE_CREATE = "REGISTRY_RESOURCE_CREATE";
+public const string AUDIT_REGISTRY_RESOURCE_UPDATE = "REGISTRY_RESOURCE_UPDATE";
+public const string AUDIT_REGISTRY_RESOURCE_DELETE = "REGISTRY_RESOURCE_DELETE";
+public const string AUDIT_REGISTRY_PROPERTIES_UPDATE = "REGISTRY_PROPERTIES_UPDATE";
 
 // ── Audit resource type constants ──────────────────────────────────────────
 

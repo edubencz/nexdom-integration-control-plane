@@ -17,17 +17,19 @@
  */
 
 import { type JSX } from 'react';
-import { Box, ListingTable, Typography, Chip } from '@wso2/oxygen-ui';
-import { Folder, FileText } from '@wso2/oxygen-ui-icons-react';
+import { Box, ListingTable, Typography, Chip, IconButton, Tooltip } from '@wso2/oxygen-ui';
+import { Folder, FileText, Trash2 } from '@wso2/oxygen-ui-icons-react';
 import type { GqlRegistryDirectoryItem } from '../api/queries';
 
 interface RegistryDirectoryViewProps {
   items: GqlRegistryDirectoryItem[];
   onNavigateInto: (itemName: string) => void;
   onSelectFile: (item: GqlRegistryDirectoryItem) => void;
+  canEdit?: boolean;
+  onDeleteFile?: (item: GqlRegistryDirectoryItem) => void;
 }
 
-export function RegistryDirectoryView({ items, onNavigateInto, onSelectFile }: RegistryDirectoryViewProps): JSX.Element {
+export function RegistryDirectoryView({ items, onNavigateInto, onSelectFile, canEdit = false, onDeleteFile }: RegistryDirectoryViewProps): JSX.Element {
   const handleItemClick = (item: GqlRegistryDirectoryItem) => {
     if (item.isDirectory) {
       onNavigateInto(item.name);
@@ -55,7 +57,8 @@ export function RegistryDirectoryView({ items, onNavigateInto, onSelectFile }: R
         <ListingTable.Row>
           <ListingTable.Cell sx={{ width: '50%' }}>Name</ListingTable.Cell>
           <ListingTable.Cell sx={{ width: '30%' }}>Type</ListingTable.Cell>
-          <ListingTable.Cell sx={{ width: '20%' }}>Properties</ListingTable.Cell>
+          <ListingTable.Cell sx={{ width: '15%' }}>Properties</ListingTable.Cell>
+          {canEdit && <ListingTable.Cell sx={{ width: '5%' }} />}
         </ListingTable.Row>
       </ListingTable.Head>
       <ListingTable.Body>
@@ -85,6 +88,9 @@ export function RegistryDirectoryView({ items, onNavigateInto, onSelectFile }: R
                 {item.properties.length > 0 ? `${item.properties.length} properties` : ''}
               </Typography>
             </ListingTable.Cell>
+            {canEdit && <ListingTable.Cell align="right">
+              {!item.isDirectory && onDeleteFile && <Tooltip title="Delete resource"><IconButton size="small" aria-label={`Delete ${item.name}`} onClick={(event) => { event.stopPropagation(); onDeleteFile(item); }}><Trash2 size={16} /></IconButton></Tooltip>}
+            </ListingTable.Cell>}
           </ListingTable.Row>
         ))}
       </ListingTable.Body>

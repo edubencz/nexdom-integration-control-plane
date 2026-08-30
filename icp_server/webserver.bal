@@ -177,6 +177,7 @@ function updateFrontendConfig() returns error? {
         "VITE_TRYIT_URL": backendTryitEndpoint,
         "VITE_MI_APPLICATIONS_URL": backendMiApplicationsEndpoint,
         "VITE_MI_SERVER_URL": backendMiServerEndpoint,
+        "VITE_MI_REGISTRY_URL": backendMiRegistryEndpoint,
         "VITE_WS_URL": backendWsUrl,
         "VITE_SSO_ENABLED": ssoEnabled,
         "VITE_SSO_ISSUER": ssoIssuer,
