@@ -47,6 +47,8 @@ function proxyMIServer(string componentId, string environmentId, string runtimeI
     if !canView {
         return miServerError(403, "Access denied");
     }
+    string action = "";
+    string auditContext = "";
     if request.method == http:PATCH {
         boolean|error canManage = auth:hasAnyPermission(userContext.userId, [auth:PERMISSION_INTEGRATION_MANAGE], scope);
         if canManage is error {
@@ -67,21 +69,30 @@ function proxyMIServer(string componentId, string environmentId, string runtimeI
         if payloadResult is error || !validPayload {
             return miServerError(400, "status must be shutdown, shutdownGracefully, restart or restartGracefully");
         }
+        map<json> payload = <map<json>>payloadResult;
+        string requestedStatus = <string>payload["status"];
+        action = requestedStatus == "restart" ? storage:AUDIT_SERVER_RESTART :
+            requestedStatus == "restartGracefully" ? storage:AUDIT_SERVER_RESTART_GRACEFULLY :
+            requestedStatus == "shutdown" ? storage:AUDIT_SERVER_SHUTDOWN : storage:AUDIT_SERVER_SHUTDOWN_GRACEFULLY;
+        auditContext = string `operation=PATCH; command=${requestedStatus}; componentId=${componentId}; environmentId=${environmentId}; runtimeId=${runtimeId}`;
         request.setJsonPayload(payloadResult);
     }
 
     string|error baseUrlResult = storage:buildManagementBaseUrl(runtime.managementHostname, runtime.managementPort);
     if baseUrlResult is error {
+        if action != "" { auditRestMutation(action, userContext.userId, userContext.username, request, storage:AUDIT_RESOURCE_RUNTIME, runtimeId, auditContext, "FAILED"); }
         return miServerError(500, "Invalid MI management endpoint: " + baseUrlResult.message());
     }
     string baseUrl = baseUrlResult;
     http:Client|error clientResult = artifactsApiAllowInsecureTLS
         ? new (baseUrl, {secureSocket: {enable: false}}) : new (baseUrl);
     if clientResult is error {
+        if action != "" { auditRestMutation(action, userContext.userId, userContext.username, request, storage:AUDIT_RESOURCE_RUNTIME, runtimeId, auditContext, "FAILED"); }
         return miServerError(502, "Failed to connect to MI management API: " + clientResult.message());
     }
     string|error hmacTokenResult = storage:issueRuntimeHmacToken(runtimeId);
     if hmacTokenResult is error {
+        if action != "" { auditRestMutation(action, userContext.userId, userContext.username, request, storage:AUDIT_RESOURCE_RUNTIME, runtimeId, auditContext, "FAILED"); }
         return miServerError(500, "Failed to create runtime authentication token: " + hmacTokenResult.message());
     }
     request.removeHeader("Authorization");
@@ -90,7 +101,12 @@ function proxyMIServer(string componentId, string environmentId, string runtimeI
     http:Response|error response = clientResult->forward("/management/server", request);
     if response is error {
         log:printError("MI server request failed", response, runtimeId = runtimeId);
+        if action != "" { auditRestMutation(action, userContext.userId, userContext.username, request, storage:AUDIT_RESOURCE_RUNTIME, runtimeId, auditContext, "UNKNOWN"); }
         return miServerError(502, "MI management API request failed: " + response.message());
+    }
+    if action != "" {
+        string outcome = response.statusCode >= 200 && response.statusCode < 300 ? "SUCCESS" : "FAILED";
+        auditRestMutation(action, userContext.userId, userContext.username, request, storage:AUDIT_RESOURCE_RUNTIME, runtimeId, auditContext, outcome, response.statusCode);
     }
     return response;
 }

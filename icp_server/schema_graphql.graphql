@@ -2,6 +2,7 @@
 # Query Type - Read Operations
 # ============================================
 type Query {
+  auditLogs(orgHandler: String!, filter: AuditLogFilter, pagination: PaginationInput): AuditLogsPage!
   # Runtime Queries
   runtimes(
     status: String
@@ -408,6 +409,34 @@ type PageInfo {
   total: Int!
   limit: Int!
   offset: Int!
+}
+
+input AuditLogFilter {
+  actions: [String!]
+  resourceTypes: [String!]
+  actor: String
+  search: String
+  startTime: String
+  endTime: String
+}
+
+type AuditLog {
+  id: Int!
+  actorUserId: String
+  actorUsername: String
+  action: String!
+  eventSource: String!
+  resourceType: String
+  resourceId: String
+  details: String
+  clientIp: String
+  userAgent: String
+  timestamp: String!
+}
+
+type AuditLogsPage {
+  items: [AuditLog!]!
+  pageInfo: PageInfo!
 }
 
 

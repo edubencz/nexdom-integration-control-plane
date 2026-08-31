@@ -695,6 +695,24 @@ service /graphql on graphqlListener {
         log:printInfo("GraphQL service started at " + serverHost + ":" + serverPort.toString());
     }
 
+    isolated resource function get auditLogs(graphql:Context context, string orgHandler, types:AuditLogFilter? filter, types:PaginationInput? pagination) returns types:AuditLogsPage|error {
+        types:UserContextV2 userContext = check extractUserContext(context);
+        if orgHandler != "default" {
+            return error("Organization not found");
+        }
+        types:AccessScope scope = auth:buildScopeFromContext("");
+        if !check auth:hasPermission(userContext.userId, auth:PERMISSION_AUDIT_VIEW, scope) {
+            return error("Insufficient permissions to view audit logs");
+        }
+        types:AuditLog[] allLogs = check storage:getAuditLogs(filter ?: {});
+        int requestedLimit = pagination?.'limit ?: 25;
+        int effectiveLimit = int:max(0, int:min(requestedLimit, 100));
+        int offset = int:max(0, pagination?.offset ?: 0);
+        int safeOffset = int:min(offset, allLogs.length());
+        int end = int:min(safeOffset + effectiveLimit, allLogs.length());
+        return {items: allLogs.slice(safeOffset, end), pageInfo: {total: allLogs.length(), 'limit: effectiveLimit, offset: safeOffset}};
+    }
+
     // ----------- Runtime Resources
     // Get all runtimes with optional filtering
     // componentId is now optional - if not provided, returns all runtimes in the project

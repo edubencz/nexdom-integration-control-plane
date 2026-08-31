@@ -39,6 +39,26 @@ function initRuntimeScheduler() returns error? {
                     intervalSeconds = refreshTokenCleanupIntervalSeconds);
         }
     }
+
+    worker auditLogCleanupWorker {
+        task:JobId|error id = task:scheduleJobRecurByFrequency(new AuditLogCleanupJob(), <decimal>auditLogCleanupIntervalSeconds);
+        if (id is error) {
+            log:printError("Failed to schedule audit log cleanup job", id);
+        } else {
+            log:printInfo("Audit log cleanup job scheduled successfully", intervalSeconds = auditLogCleanupIntervalSeconds);
+        }
+    }
+}
+
+class AuditLogCleanupJob {
+    *task:Job;
+
+    public function execute() {
+        error? e = storage:cleanupAuditLogs(auditLogRetentionDays);
+        if (e is error) {
+            log:printError("Failed to cleanup audit logs", e);
+        }
+    }
 }
 
 // Creates a job to be executed by the scheduler.

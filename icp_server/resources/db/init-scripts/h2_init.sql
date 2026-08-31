@@ -208,7 +208,8 @@ CREATE TABLE permissions (
             'Observability-Management',
             'Project-Management',
             'User-Management',
-            'Workflow-Management'
+            'Workflow-Management',
+            'Audit-Management'
         )
     )
 );
@@ -657,6 +658,9 @@ INSERT INTO permissions (permission_id, permission_name, permission_domain, reso
     ('a1f4c2e0-0000-4000-8000-000000000002', 'workflow_mgt:manage_human_tasks', 'Workflow-Management', 'human_task', 'manage', 'Complete, fail and cancel human tasks'),
     ('a1f4c2e0-0000-4000-8000-000000000003', 'workflow_mgt:view_workflows', 'Workflow-Management', 'workflow', 'view', 'View workflow executions'),
     ('a1f4c2e0-0000-4000-8000-000000000004', 'workflow_mgt:manage_workflows', 'Workflow-Management', 'workflow', 'manage', 'Start, suspend, resume, cancel and terminate workflow executions');
+
+INSERT INTO permissions (permission_id, permission_name, permission_domain, resource_type, action, description)
+VALUES (RANDOM_UUID(), 'audit_mgt:view', 'Audit-Management', 'audit_logs', 'view', 'View audit logs');
 
 -- Map Super Admin to ALL permissions
 INSERT INTO
@@ -1473,6 +1477,9 @@ CREATE TABLE audit_logs (
     id BIGINT NOT NULL PRIMARY KEY AUTO_INCREMENT,
     runtime_id CHAR(36),
     user_id CHAR(36),
+    org_id INT DEFAULT 1,
+    event_source VARCHAR(30) NOT NULL DEFAULT 'RUNTIME',
+    actor_username VARCHAR(255),
     action VARCHAR(100) NOT NULL,
     resource_type VARCHAR(50),
     resource_id VARCHAR(200),
@@ -1496,6 +1503,7 @@ CREATE INDEX idx_audit_logs_resource_type ON audit_logs (resource_type);
 CREATE INDEX idx_audit_logs_timestamp ON audit_logs (timestamp);
 
 CREATE INDEX idx_audit_logs_client_ip ON audit_logs (client_ip);
+CREATE INDEX idx_audit_logs_source_time ON audit_logs (event_source, timestamp);
 
 CREATE TABLE system_events (
     id BIGINT NOT NULL PRIMARY KEY AUTO_INCREMENT,

@@ -581,7 +581,11 @@ function CarbonApplicationsPanel({ envId, projectId, componentId, onSelectArtifa
       setAddFeedback({ phase: 'uploading', ...fileDetails });
       const form = new FormData();
       form.append('file', file, file.name);
-      const response = await authenticatedFetch(miApplicationsApiUrl(componentId, envId, runtimeId), { method: 'POST', body: form });
+      const response = await authenticatedFetch(miApplicationsApiUrl(componentId, envId, runtimeId), {
+        method: 'POST',
+        headers: { 'X-ICP-Artifact-Name': file.name },
+        body: form,
+      });
       const rawResponse = await response.text();
       let payload: unknown = {};
       try { payload = rawResponse ? JSON.parse(rawResponse) : {}; } catch { /* keep raw response */ }

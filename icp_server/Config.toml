@@ -23,6 +23,8 @@ schedulerIntervalSeconds = 60  # 1 minute
 # Logging and monitoring settings
 logLevel = "INFO"  # Options: DEBUG, INFO, WARN, ERROR
 enableAuditLogging = true
+auditLogRetentionDays = 90
+auditLogCleanupIntervalSeconds = 86400
 # auditLogFilePath = "../logs/audit.log"  # Dedicated audit log file (JSONL format); set to "" to disable file output
 enableMetrics = true
 

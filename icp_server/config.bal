@@ -140,6 +140,8 @@ configurable boolean federatedAccessControlEnabled = false; // Manage group memb
 configurable string logLevel = "INFO"; // DEBUG, INFO, WARN, ERROR
 configurable boolean enableAuditLogging = true;
 configurable string auditLogFilePath = "../logs/audit.log";
+configurable int auditLogRetentionDays = 90;
+configurable int auditLogCleanupIntervalSeconds = 86400;
 configurable boolean enableMetrics = true;
 
 // Observability Adapter configuration
