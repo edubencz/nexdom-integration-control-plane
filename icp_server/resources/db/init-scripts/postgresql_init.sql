@@ -232,7 +232,8 @@ CREATE TABLE permissions (
         'Observability-Management',
         'Project-Management',
         'User-Management',
-        'Workflow-Management'
+        'Workflow-Management',
+        'Audit-Management'
     )),
     resource_type VARCHAR(100) NOT NULL,
     action VARCHAR(100) NOT NULL,
@@ -544,6 +545,9 @@ INSERT INTO permissions (permission_id, permission_name, permission_domain, reso
     ('a1f4c2e0-0000-4000-8000-000000000002', 'workflow_mgt:manage_human_tasks', 'Workflow-Management', 'human_task', 'manage', 'Complete, fail and cancel human tasks'),
     ('a1f4c2e0-0000-4000-8000-000000000003', 'workflow_mgt:view_workflows', 'Workflow-Management', 'workflow', 'view', 'View workflow executions'),
     ('a1f4c2e0-0000-4000-8000-000000000004', 'workflow_mgt:manage_workflows', 'Workflow-Management', 'workflow', 'manage', 'Start, suspend, resume, cancel and terminate workflow executions');
+
+INSERT INTO permissions (permission_id, permission_name, permission_domain, resource_type, action, description)
+VALUES (gen_random_uuid()::text, 'audit_mgt:view', 'Audit-Management', 'audit_logs', 'view', 'View audit logs');
 
 -- Map Super Admin to ALL permissions
 INSERT INTO role_permission_mapping (role_id, permission_id)
@@ -1290,6 +1294,9 @@ CREATE TABLE audit_logs (
     id BIGSERIAL PRIMARY KEY,
     runtime_id CHAR(36) NULL,
     user_id CHAR(36) NULL,
+    org_id INT NULL DEFAULT 1,
+    event_source VARCHAR(30) NOT NULL DEFAULT 'RUNTIME',
+    actor_username VARCHAR(255) NULL,
     action VARCHAR(100) NOT NULL,
     resource_type VARCHAR(50) NULL, -- runtime, service, listener, command
     resource_id VARCHAR(200) NULL,
@@ -1308,6 +1315,7 @@ CREATE INDEX idx_al_action ON audit_logs(action);
 CREATE INDEX idx_al_resource_type ON audit_logs(resource_type);
 CREATE INDEX idx_al_timestamp ON audit_logs(timestamp);
 CREATE INDEX idx_al_client_ip ON audit_logs(client_ip);
+CREATE INDEX idx_al_source_timestamp ON audit_logs(event_source, timestamp);
 
 CREATE TABLE system_events (
     id BIGSERIAL PRIMARY KEY,

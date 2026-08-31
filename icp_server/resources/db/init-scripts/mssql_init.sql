@@ -332,7 +332,8 @@ CREATE TABLE permissions (
             'Observability-Management',
             'Project-Management',
             'User-Management',
-            'Workflow-Management'
+            'Workflow-Management',
+            'Audit-Management'
         )
     ),
     resource_type NVARCHAR (100) NOT NULL,
@@ -858,6 +859,10 @@ INSERT INTO permissions (permission_id, permission_name, permission_domain, reso
     ('a1f4c2e0-0000-4000-8000-000000000002', 'workflow_mgt:manage_human_tasks', 'Workflow-Management', 'human_task', 'manage', 'Complete, fail and cancel human tasks'),
     ('a1f4c2e0-0000-4000-8000-000000000003', 'workflow_mgt:view_workflows', 'Workflow-Management', 'workflow', 'view', 'View workflow executions'),
     ('a1f4c2e0-0000-4000-8000-000000000004', 'workflow_mgt:manage_workflows', 'Workflow-Management', 'workflow', 'manage', 'Start, suspend, resume, cancel and terminate workflow executions');
+GO
+
+INSERT INTO permissions (permission_id, permission_name, permission_domain, resource_type, action, description)
+VALUES (CONVERT(VARCHAR(36), NEWID()), 'audit_mgt:view', 'Audit-Management', 'audit_logs', 'view', 'View audit logs');
 GO
 
 -- Map Super Admin to ALL permissions
@@ -2092,6 +2097,9 @@ CREATE TABLE audit_logs (
     id BIGINT IDENTITY (1, 1) PRIMARY KEY,
     runtime_id CHAR(36) NULL,
     user_id CHAR(36) NULL,
+    org_id INT NULL CONSTRAINT df_audit_org DEFAULT 1,
+    event_source NVARCHAR (30) NOT NULL CONSTRAINT df_audit_source DEFAULT 'RUNTIME',
+    actor_username NVARCHAR (255) NULL,
     action NVARCHAR (100) NOT NULL,
     resource_type NVARCHAR (50) NULL, -- runtime, service, listener, command
     resource_id NVARCHAR (200) NULL,
@@ -2108,6 +2116,7 @@ CREATE TABLE audit_logs (
     INDEX idx_resource_type (resource_type),
     INDEX idx_timestamp (timestamp),
     INDEX idx_client_ip (client_ip)
+    , INDEX idx_source_timestamp (event_source, timestamp)
 );
 GO
 

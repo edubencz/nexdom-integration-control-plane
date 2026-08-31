@@ -17,7 +17,9 @@
 import ballerina/io;
 import ballerina/lang.runtime;
 import ballerina/log;
+import ballerina/sql;
 import ballerina/time;
+import icp_server.types as types;
 
 // ── Audit action constants ─────────────────────────────────────────────────
 
@@ -95,6 +97,12 @@ public const string AUDIT_REGISTRY_RESOURCE_CREATE = "REGISTRY_RESOURCE_CREATE";
 public const string AUDIT_REGISTRY_RESOURCE_UPDATE = "REGISTRY_RESOURCE_UPDATE";
 public const string AUDIT_REGISTRY_RESOURCE_DELETE = "REGISTRY_RESOURCE_DELETE";
 public const string AUDIT_REGISTRY_PROPERTIES_UPDATE = "REGISTRY_PROPERTIES_UPDATE";
+public const string AUDIT_COMPOSITE_APP_UPLOAD = "COMPOSITE_APP_UPLOAD";
+public const string AUDIT_COMPOSITE_APP_DELETE = "COMPOSITE_APP_DELETE";
+public const string AUDIT_SERVER_RESTART = "SERVER_RESTART";
+public const string AUDIT_SERVER_RESTART_GRACEFULLY = "SERVER_RESTART_GRACEFULLY";
+public const string AUDIT_SERVER_SHUTDOWN = "SERVER_SHUTDOWN";
+public const string AUDIT_SERVER_SHUTDOWN_GRACEFULLY = "SERVER_SHUTDOWN_GRACEFULLY";
 
 // ── Audit resource type constants ──────────────────────────────────────────
 
@@ -107,9 +115,77 @@ public const string AUDIT_RESOURCE_PROJECT = "PROJECT";
 public const string AUDIT_RESOURCE_COMPONENT = "COMPONENT";
 public const string AUDIT_RESOURCE_RUNTIME = "RUNTIME";
 public const string AUDIT_RESOURCE_ARTIFACT = "ARTIFACT";
+public const string AUDIT_RESOURCE_COMPOSITE_APP = "COMPOSITE_APP";
+public const string AUDIT_RESOURCE_REGISTRY_RESOURCE = "REGISTRY_RESOURCE";
 public const string AUDIT_RESOURCE_LOGGER = "LOGGER";
 public const string AUDIT_RESOURCE_LISTENER = "LISTENER";
 public const string AUDIT_RESOURCE_SECRET = "SECRET";
+
+public isolated function getAuditLogs(types:AuditLogFilter filter = {}) returns types:AuditLog[]|error {
+    string actor = filter.actor ?: "";
+    string search = filter.search ?: "";
+    string[] actions = filter.actions ?: [];
+    string[] resourceTypes = filter.resourceTypes ?: [];
+    sql:ParameterizedQuery query = `SELECT id, user_id, actor_username, action, event_source,
+        resource_type, resource_id, details, client_ip, user_agent, timestamp
+        FROM audit_logs WHERE event_source = 'CONTROL_PLANE' AND org_id = 1`;
+    if actor.trim().length() > 0 {
+        query = sql:queryConcat(query, ` AND UPPER(COALESCE(actor_username, '')) LIKE UPPER(${"%" + actor.trim() + "%"})`);
+    }
+    if actions.length() > 0 {
+        sql:ParameterizedQuery values = `(`;
+        foreach int i in 0 ..< actions.length() {
+            if i > 0 { values = sql:queryConcat(values, `, `); }
+            values = sql:queryConcat(values, `${actions[i]}`);
+        }
+        values = sql:queryConcat(values, `)`);
+        query = sql:queryConcat(query, ` AND action IN `, values);
+    }
+    if resourceTypes.length() > 0 {
+        sql:ParameterizedQuery values = `(`;
+        foreach int i in 0 ..< resourceTypes.length() {
+            if i > 0 { values = sql:queryConcat(values, `, `); }
+            values = sql:queryConcat(values, `${resourceTypes[i]}`);
+        }
+        values = sql:queryConcat(values, `)`);
+        query = sql:queryConcat(query, ` AND resource_type IN `, values);
+    }
+    if search.trim().length() > 0 {
+        string term = "%" + search.trim() + "%";
+        query = sql:queryConcat(query, ` AND (UPPER(COALESCE(actor_username, '')) LIKE UPPER(${term}) OR UPPER(COALESCE(details, '')) LIKE UPPER(${term}) OR UPPER(COALESCE(resource_id, '')) LIKE UPPER(${term}))`);
+    }
+    if filter.startTime is string {
+        query = sql:queryConcat(query, ` AND timestamp >= ${filter.startTime}`);
+    }
+    if filter.endTime is string {
+        query = sql:queryConcat(query, ` AND timestamp <= ${filter.endTime}`);
+    }
+    query = sql:queryConcat(query, ` ORDER BY timestamp DESC, id DESC`);
+    stream<record {|int id; string? user_id; string? actor_username; string action; string event_source; string? resource_type; string? resource_id; string? details; string? client_ip; string? user_agent; string timestamp;|}, sql:Error?> rows = dbClient->query(query);
+    types:AuditLog[] result = [];
+    check from record {|int id; string? user_id; string? actor_username; string action; string event_source; string? resource_type; string? resource_id; string? details; string? client_ip; string? user_agent; string timestamp;|} row in rows do {
+        result.push({id: row.id, actorUserId: row.user_id, actorUsername: row.actor_username,
+            action: row.action, eventSource: row.event_source, resourceType: row.resource_type,
+            resourceId: row.resource_id, details: row.details, clientIp: row.client_ip,
+            userAgent: row.user_agent, timestamp: convertDbDateTimeToISO8601(row.timestamp)});
+    };
+    return result;
+}
+
+public isolated function cleanupAuditLogs(int retentionDays) returns error? {
+    if retentionDays <= 0 {
+        return;
+    }
+    // Compute the cutoff in the server and bind it as a timestamp value to keep
+    // the statement portable across all supported database engines.
+    time:Utc cutoff = time:utcAddSeconds(time:utcNow(), -retentionDays * 86400);
+    time:Civil civil = time:utcToCivil(cutoff);
+    string cutoffText = string `${civil.year}-${civil.month.toString().padStart(2, "0")}-${civil.day.toString().padStart(2, "0")}T${civil.hour.toString().padStart(2, "0")}:${civil.minute.toString().padStart(2, "0")}:00Z`;
+    sql:ExecutionResult|sql:Error result = dbClient->execute(`DELETE FROM audit_logs WHERE event_source = 'CONTROL_PLANE' AND timestamp < ${cutoffText}`);
+    if result is sql:Error {
+        return result;
+    }
+}
 
 // ── Module-level isolated state ────────────────────────────────────────────
 
@@ -118,16 +194,25 @@ isolated boolean auditEnabled = false;
 // Prevents unbounded queue growth when file output is disabled or the file
 // cannot be opened.
 isolated boolean auditFileDraining = false;
-// JSONL lines queued for the background file-drainer strand.
-// string is immutable in Ballerina, so it is a valid isolated expression and
-// can be pushed/popped across lock boundaries.
-isolated string[] pendingAuditLines = [];
+type AuditEvent record {|
+    string timestamp;
+    string? orgId;
+    string action;
+    string? userId;
+    string? actorUsername;
+    string? resourceType;
+    string? resourceId;
+    string? details;
+    string? clientIp;
+    string? userAgent;
+|} & readonly;
+isolated AuditEvent[] pendingAuditEvents = [];
 
 // ── Initialization ─────────────────────────────────────────────────────────
 
 // Called from the non-isolated init() in init.bal.
-// Starts a background strand that drains pendingAuditLines to the audit log
-// file, keeping I/O entirely out of the isolated logAuditEvent function.
+// Starts a background strand that drains pending audit events to the database
+// and optional audit log file.
 public function initAuditLogging(boolean enabled, string filePath) {
     lock {
         auditEnabled = enabled;
@@ -138,7 +223,7 @@ public function initAuditLogging(boolean enabled, string filePath) {
                 auditFile = filePath.length() > 0 ? filePath : "application log only");
     }
 
-    if enabled && filePath.length() > 0 {
+    if enabled {
         lock {
             auditFileDraining = true;
         }
@@ -158,7 +243,8 @@ public isolated function logAuditEvent(
         string? resourceId = (),
         string? details = (),
         string? clientIp = (),
-        string? userAgent = ()
+        string? userAgent = (),
+        string? actorUsername = ()
 ) {
     boolean enabled;
     lock {
@@ -179,16 +265,22 @@ public isolated function logAuditEvent(
             clientIp = clientIp ?: "");
 
     string timestamp = buildTimestamp();
-    json entry = {
+    string? resolvedActor = actorUsername;
+    if resolvedActor is () && userId is string {
+        resolvedActor = getDisplayNameById(userId);
+    }
+    AuditEvent event = {
         timestamp: timestamp,
         action: action,
+        orgId: "1",
         userId: userId,
+        actorUsername: resolvedActor,
         resourceType: resourceType,
         resourceId: resourceId,
         details: details,
-        clientIp: clientIp
+        clientIp: clientIp,
+        userAgent: userAgent
     };
-    string line = entry.toJsonString() + "\n";
 
     // Enqueue for the background file-drainer only while it is active.
     boolean fileDraining;
@@ -197,7 +289,7 @@ public isolated function logAuditEvent(
     }
     if fileDraining {
         lock {
-            pendingAuditLines.push(line);
+            pendingAuditEvents.push(event);
         }
     }
 }
@@ -205,29 +297,41 @@ public isolated function logAuditEvent(
 // ── Background file drainer ────────────────────────────────────────────────
 
 // Runs as a separate strand (started from initAuditLogging). Opens the audit
-// log file once, then continuously drains pendingAuditLines until the process
+// log file once, then continuously drains pending audit events until the process
 // exits. Uses a short sleep when the queue is empty to avoid busy-waiting.
 function runAuditFileDrainer(string filePath) {
-    io:WritableByteChannel|io:Error byteChannel = io:openWritableFile(filePath, option = io:APPEND);
-    if byteChannel is io:Error {
-        log:printError("Cannot open audit log file; file output disabled", byteChannel, filePath = filePath);
-        lock {
-            auditFileDraining = false;
+    io:WritableCharacterChannel? charChannel = ();
+    if filePath.length() > 0 {
+        io:WritableByteChannel|io:Error byteChannel = io:openWritableFile(filePath, option = io:APPEND);
+        if byteChannel is io:Error {
+            log:printError("Cannot open audit log file; file output disabled", byteChannel, filePath = filePath);
+        } else {
+            charChannel = new (byteChannel, "UTF-8");
         }
-        return;
     }
-    io:WritableCharacterChannel charChannel = new (byteChannel, "UTF-8");
     while true {
-        string? line = ();
+        AuditEvent? event = ();
         lock {
-            if pendingAuditLines.length() > 0 {
-                line = pendingAuditLines.remove(0);
+            if pendingAuditEvents.length() > 0 {
+                event = pendingAuditEvents.remove(0);
             }
         }
-        if line is string {
-            int|io:Error writeResult = charChannel.write(line, 0);
-            if writeResult is io:Error {
-                log:printError("Failed to write audit entry to log file", writeResult);
+        if event is AuditEvent {
+            sql:ParameterizedQuery auditQuery = sql:queryConcat(`
+                INSERT INTO audit_logs (org_id, event_source, user_id, actor_username, action,
+                    resource_type, resource_id, details, client_ip, user_agent, timestamp)
+                VALUES (${event.orgId}, 'CONTROL_PLANE', ${event.userId}, COALESCE(${event.actorUsername}, (SELECT username FROM users WHERE user_id = ${event.userId})), ${event.action},
+                    ${event.resourceType}, ${event.resourceId}, ${event.details}, ${event.clientIp},
+                    ${event.userAgent}, `, sql:queryConcat(sqlQueryFromString(timestampCast(event.timestamp)), `)`));
+            sql:ExecutionResult|sql:Error result = dbClient->execute(auditQuery);
+            if result is sql:Error {
+                log:printError("Failed to persist audit entry to database", result, action = event.action);
+            }
+            if charChannel is io:WritableCharacterChannel {
+                int|io:Error writeResult = charChannel.write(event.toJsonString() + "\n", 0);
+                if writeResult is io:Error {
+                    log:printError("Failed to write audit entry to log file", writeResult);
+                }
             }
         } else {
             // Nothing queued — yield for 100 ms before checking again.

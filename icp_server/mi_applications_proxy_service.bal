@@ -57,8 +57,20 @@ function proxyMIApplications(string componentId, string environmentId, string ru
         }
     }
 
+    boolean auditMutation = request.method != http:GET;
+    string? artifactName = ();
+    if request.method == http:POST {
+        string|http:HeaderNotFoundError artifactHeader = request.getHeader("X-ICP-Artifact-Name");
+        artifactName = artifactHeader is string && artifactHeader.trim() != "" ? artifactHeader.trim() : ();
+        request.removeHeader("X-ICP-Artifact-Name");
+    }
+    string action = request.method == http:POST ? storage:AUDIT_COMPOSITE_APP_UPLOAD : storage:AUDIT_COMPOSITE_APP_DELETE;
+    string resourceId = request.method == http:POST ? (artifactName ?: "unknown") : (appPath.length() > 0 ? appPath[0] : "unknown");
+    string auditContext = string `operation=${request.method}; componentId=${componentId}; environmentId=${environmentId}; runtimeId=${runtimeId}; target=${resourceId}`;
+
     string|error baseUrlResult = storage:buildManagementBaseUrl(runtime.managementHostname, runtime.managementPort);
     if baseUrlResult is error {
+        if auditMutation { auditRestMutation(action, userContext.userId, userContext.username, request, storage:AUDIT_RESOURCE_COMPOSITE_APP, resourceId, auditContext, "FAILED"); }
         return miApplicationsError(500, "Invalid MI management endpoint: " + baseUrlResult.message());
     }
     string baseUrl = baseUrlResult;
@@ -66,10 +78,12 @@ function proxyMIApplications(string componentId, string environmentId, string ru
             ? new (baseUrl, {secureSocket: {enable: false}})
             : new (baseUrl);
     if clientResult is error {
+        if auditMutation { auditRestMutation(action, userContext.userId, userContext.username, request, storage:AUDIT_RESOURCE_COMPOSITE_APP, resourceId, auditContext, "FAILED"); }
         return miApplicationsError(502, "Failed to connect to MI management API: " + clientResult.message());
     }
     string|error hmacTokenResult = storage:issueRuntimeHmacToken(runtimeId);
     if hmacTokenResult is error {
+        if auditMutation { auditRestMutation(action, userContext.userId, userContext.username, request, storage:AUDIT_RESOURCE_COMPOSITE_APP, resourceId, auditContext, "FAILED"); }
         return miApplicationsError(500, "Failed to create runtime authentication token: " + hmacTokenResult.message());
     }
     string hmacToken = hmacTokenResult;
@@ -88,8 +102,11 @@ function proxyMIApplications(string componentId, string environmentId, string ru
     http:Response|error response = clientResult->forward("/management/applications" + suffix, request);
     if response is error {
         log:printError("MI Carbon Applications request failed", response, runtimeId = runtimeId);
+        if auditMutation { auditRestMutation(action, userContext.userId, userContext.username, request, storage:AUDIT_RESOURCE_COMPOSITE_APP, resourceId, auditContext, "FAILED"); }
         return miApplicationsError(502, "MI management API request failed: " + response.message());
     }
+    string outcome = response.statusCode >= 200 && response.statusCode < 300 ? "SUCCESS" : "FAILED";
+    if auditMutation { auditRestMutation(action, userContext.userId, userContext.username, request, storage:AUDIT_RESOURCE_COMPOSITE_APP, resourceId, auditContext, outcome, response.statusCode); }
     return response;
 }
 
@@ -97,7 +114,7 @@ function proxyMIApplications(string componentId, string environmentId, string ru
     auth: [{jwtValidatorConfig: {issuer: frontendJwtIssuer, audience: frontendJwtAudience,
         signatureConfig: {secret: resolvedFrontendJwtHMACSecret}}}],
     cors: {allowOrigins: normalizedCorsAllowedOrigins,
-        allowHeaders: ["Content-Type", "Authorization"]}
+        allowHeaders: ["Content-Type", "Authorization", "X-ICP-Artifact-Name"]}
 }
 service /icp/mi_applications on httpListener {
     resource function get [string componentId]/[string environmentId]/[string runtimeId](http:Caller caller, http:Request request) returns error? {

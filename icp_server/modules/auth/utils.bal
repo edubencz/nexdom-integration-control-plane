@@ -55,6 +55,7 @@ public const string PERMISSION_USER_UPDATE_USERS = "user_mgt:update_users";
 public const string PERMISSION_USER_MANAGE_GROUPS = "user_mgt:manage_groups";
 public const string PERMISSION_USER_MANAGE_ROLES = "user_mgt:manage_roles";
 public const string PERMISSION_USER_UPDATE_GROUP_ROLES = "user_mgt:update_group_roles";
+public const string PERMISSION_AUDIT_VIEW = "audit_mgt:view";
 
 // ============================================================================
 // TOKEN GENERATION

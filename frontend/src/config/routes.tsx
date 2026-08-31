@@ -39,6 +39,7 @@ import ComponentGroupDetail from '../pages/ComponentGroupDetail';
 import Profile from '../pages/Profile';
 import ForceChangePassword from '../pages/ForceChangePassword';
 import ManageLoggers from '../pages/ManageLoggers';
+import AuditLogs from '../pages/AuditLogs';
 import { ScopeResolver, generateMatrixRoutes, withScope, type Matrix } from '../nav';
 import { createElement } from 'react';
 import ErrorPage from '../pages/Error';
@@ -56,6 +57,7 @@ const MATRIX: Matrix = {
   metrics: { segment: 'metrics', pages: { projects: Metrics, components: Metrics } },
   runtimes: { segment: 'runtimes', pages: { organizations: OrgRuntimes, projects: Runtime, components: Runtime } },
   environments: { segment: 'environments', pages: { organizations: Environments, projects: Environments } },
+  'audit-logs': { segment: 'audit-logs', pages: { organizations: AuditLogs } },
   'access-control': { segment: 'settings/access-control/:tab', pages: { organizations: OrgAccessControl, projects: ProjectAccessControl, components: ComponentAccessControl } },
 };
 

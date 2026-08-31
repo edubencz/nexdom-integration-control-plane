@@ -137,6 +137,34 @@ public type PageInfo record {
     int offset;
 };
 
+public type AuditLog record {
+    int id;
+    string? actorUserId;
+    string? actorUsername;
+    string action;
+    string eventSource;
+    string? resourceType;
+    string? resourceId;
+    string? details;
+    string? clientIp;
+    string? userAgent;
+    string timestamp;
+};
+
+public type AuditLogFilter record {|
+    string[] actions?;
+    string[] resourceTypes?;
+    string actor?;
+    string search?;
+    string startTime?;
+    string endTime?;
+|};
+
+public type AuditLogsPage record {
+    AuditLog[] items;
+    PageInfo pageInfo;
+};
+
 public type ComponentsPage record {
     Component[] items;
     PageInfo pageInfo;

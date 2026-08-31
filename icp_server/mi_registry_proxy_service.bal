@@ -129,8 +129,14 @@ function proxyMIRegistry(string componentId, string environmentId, string runtim
         request.setJsonPayload(payloadResult);
     }
 
+    string action = registryOperation == "properties" ? storage:AUDIT_REGISTRY_PROPERTIES_UPDATE :
+        request.method == http:POST ? storage:AUDIT_REGISTRY_RESOURCE_CREATE :
+        request.method == http:PUT ? storage:AUDIT_REGISTRY_RESOURCE_UPDATE : storage:AUDIT_REGISTRY_RESOURCE_DELETE;
+    string auditContext = string `operation=${request.method}; componentId=${componentId}; environmentId=${environmentId}; runtimeId=${runtimeId}; path=${path}`;
+
     string|error baseUrlResult = storage:buildManagementBaseUrl(runtime.managementHostname, runtime.managementPort);
     if baseUrlResult is error {
+        auditRestMutation(action, userContext.userId, userContext.username, request, storage:AUDIT_RESOURCE_REGISTRY_RESOURCE, path, auditContext, "FAILED");
         return miRegistryError(500, "Invalid MI management endpoint: " + baseUrlResult.message());
     }
     string baseUrl = baseUrlResult;
@@ -138,10 +144,12 @@ function proxyMIRegistry(string componentId, string environmentId, string runtim
             ? new (baseUrl, {secureSocket: {enable: false}})
             : new (baseUrl);
     if clientResult is error {
+        auditRestMutation(action, userContext.userId, userContext.username, request, storage:AUDIT_RESOURCE_REGISTRY_RESOURCE, path, auditContext, "FAILED");
         return miRegistryError(502, "Failed to connect to MI management API: " + clientResult.message());
     }
     string|error hmacTokenResult = storage:issueRuntimeHmacToken(runtimeId);
     if hmacTokenResult is error {
+        auditRestMutation(action, userContext.userId, userContext.username, request, storage:AUDIT_RESOURCE_REGISTRY_RESOURCE, path, auditContext, "FAILED");
         return miRegistryError(500, "Failed to create runtime authentication token: " + hmacTokenResult.message());
     }
     request.removeHeader("Authorization");
@@ -157,16 +165,13 @@ function proxyMIRegistry(string componentId, string environmentId, string runtim
         "/management/registry-resources/" + registryOperation + queryResult, request);
     if upstream is error {
         log:printError("MI Registry request failed", upstream, runtimeId = runtimeId, operation = registryOperation, path = path);
+        auditRestMutation(action, userContext.userId, userContext.username, request, storage:AUDIT_RESOURCE_REGISTRY_RESOURCE, path, auditContext, "FAILED");
         return miRegistryError(502, "MI management API request failed: " + upstream.message());
     }
 
-    if isMutation(request) && upstream.statusCode >= 200 && upstream.statusCode < 300 {
-        string action = registryOperation == "properties" ? storage:AUDIT_REGISTRY_PROPERTIES_UPDATE :
-            request.method == http:POST ? storage:AUDIT_REGISTRY_RESOURCE_CREATE :
-            request.method == http:PUT ? storage:AUDIT_REGISTRY_RESOURCE_UPDATE : storage:AUDIT_REGISTRY_RESOURCE_DELETE;
-        storage:logAuditEvent(action, userId = userContext.userId,
-                resourceType = "REGISTRY_RESOURCE", resourceId = runtimeId,
-                details = string `runtime=${runtimeId}, path=${path}`);
+    if isMutation(request) {
+        string outcome = upstream.statusCode >= 200 && upstream.statusCode < 300 ? "SUCCESS" : "FAILED";
+        auditRestMutation(action, userContext.userId, userContext.username, request, storage:AUDIT_RESOURCE_REGISTRY_RESOURCE, path, auditContext, outcome, upstream.statusCode);
     }
     return upstream;
 }

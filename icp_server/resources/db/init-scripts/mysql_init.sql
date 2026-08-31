@@ -184,7 +184,8 @@ CREATE TABLE permissions (
         'Observability-Management',
         'Project-Management',
         'User-Management',
-        'Workflow-Management'
+        'Workflow-Management',
+        'Audit-Management'
     ) NOT NULL,
     resource_type VARCHAR(100) NOT NULL,
     action VARCHAR(100) NOT NULL,
@@ -481,6 +482,9 @@ INSERT INTO permissions (permission_id, permission_name, permission_domain, reso
     ('a1f4c2e0-0000-4000-8000-000000000002', 'workflow_mgt:manage_human_tasks', 'Workflow-Management', 'human_task', 'manage', 'Complete, fail and cancel human tasks'),
     ('a1f4c2e0-0000-4000-8000-000000000003', 'workflow_mgt:view_workflows', 'Workflow-Management', 'workflow', 'view', 'View workflow executions'),
     ('a1f4c2e0-0000-4000-8000-000000000004', 'workflow_mgt:manage_workflows', 'Workflow-Management', 'workflow', 'manage', 'Start, suspend, resume, cancel and terminate workflow executions');
+
+INSERT INTO permissions (permission_id, permission_name, permission_domain, resource_type, action, description)
+VALUES (UUID(), 'audit_mgt:view', 'Audit-Management', 'audit_logs', 'view', 'View audit logs');
 
 -- Map Super Admin to ALL permissions
 INSERT INTO role_permission_mapping (role_id, permission_id)
@@ -1255,6 +1259,9 @@ CREATE TABLE audit_logs (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     runtime_id CHAR(36) NULL,
     user_id CHAR(36) NULL,
+    org_id INT NULL DEFAULT 1,
+    event_source VARCHAR(30) NOT NULL DEFAULT 'RUNTIME',
+    actor_username VARCHAR(255) NULL,
     action VARCHAR(100) NOT NULL,
     resource_type VARCHAR(50) NULL, -- runtime, service, listener, command
     resource_id VARCHAR(200) NULL,
@@ -1271,6 +1278,7 @@ CREATE TABLE audit_logs (
     INDEX idx_resource_type (resource_type),
     INDEX idx_timestamp (timestamp),
     INDEX idx_client_ip (client_ip)
+    , INDEX idx_source_timestamp (event_source, timestamp)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
 
 CREATE TABLE system_events (

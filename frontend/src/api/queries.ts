@@ -7,6 +7,45 @@ export interface GqlPageInfo {
   offset: number;
 }
 
+export interface GqlAuditLog {
+  id: number;
+  actorUserId?: string | null;
+  actorUsername?: string | null;
+  action: string;
+  eventSource: string;
+  resourceType?: string | null;
+  resourceId?: string | null;
+  details?: string | null;
+  clientIp?: string | null;
+  userAgent?: string | null;
+  timestamp: string;
+}
+
+export interface AuditLogFilter {
+  actions?: string[];
+  resourceTypes?: string[];
+  actor?: string;
+  search?: string;
+  startTime?: string;
+  endTime?: string;
+}
+
+const AUDIT_LOGS_QUERY = `
+  query GetAuditLogs($orgHandler: String!, $filter: AuditLogFilter, $pagination: PaginationInput) {
+    auditLogs(orgHandler: $orgHandler, filter: $filter, pagination: $pagination) {
+      items { id, actorUserId, actorUsername, action, eventSource, resourceType, resourceId, details, clientIp, userAgent, timestamp }
+      pageInfo { total, limit, offset }
+    }
+  }`;
+
+export function useAuditLogs(orgHandler: string, filter: AuditLogFilter, limit: number, offset: number) {
+  return useQuery({
+    queryKey: ['auditLogs', orgHandler, filter, limit, offset],
+    queryFn: () => gql<{ auditLogs: { items: GqlAuditLog[]; pageInfo: GqlPageInfo } }>(AUDIT_LOGS_QUERY, { orgHandler, filter, pagination: { limit, offset } }).then((d) => d.auditLogs),
+    enabled: !!orgHandler,
+  });
+}
+
 export interface GqlProject {
   id: string;
   orgId: number;
