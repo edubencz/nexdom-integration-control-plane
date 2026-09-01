@@ -333,7 +333,8 @@ CREATE TABLE permissions (
             'Project-Management',
             'User-Management',
             'Workflow-Management',
-            'Audit-Management'
+            'Audit-Management',
+            'Deployment-Management'
         )
     ),
     resource_type NVARCHAR (100) NOT NULL,
@@ -863,6 +864,9 @@ GO
 
 INSERT INTO permissions (permission_id, permission_name, permission_domain, resource_type, action, description)
 VALUES (CONVERT(VARCHAR(36), NEWID()), 'audit_mgt:view', 'Audit-Management', 'audit_logs', 'view', 'View audit logs');
+INSERT INTO permissions (permission_id, permission_name, permission_domain, resource_type, action, description) VALUES
+('d1f4c2e0-0000-4000-8000-000000000001', 'deployment_mgt:view', 'Deployment-Management', 'deployment', 'view', 'View MI deployment operations'),
+('d1f4c2e0-0000-4000-8000-000000000002', 'deployment_mgt:manage', 'Deployment-Management', 'deployment', 'manage', 'Create and execute MI deployment operations');
 GO
 
 -- Map Super Admin to ALL permissions

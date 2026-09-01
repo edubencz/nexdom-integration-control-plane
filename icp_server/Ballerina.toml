@@ -10,4 +10,8 @@ org = "ballerina"
 name = "websocket"
 version = "2.15.3"
 
+[[dependency]]
+org = "ballerina"
+name = "zip"
+version = "1.0.1"
 

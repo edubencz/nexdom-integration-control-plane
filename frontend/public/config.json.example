@@ -2,6 +2,7 @@
   "VITE_GRAPHQL_URL": "https://localhost:9446/graphql",
   "VITE_AUTH_BASE_URL": "https://localhost:9446/auth",
   "VITE_OBSERVABILITY_URL": "https://localhost:9446/icp/observability/logs?live=true",
+  "VITE_MI_DEPLOYMENTS_URL": "https://localhost:9446/icp/mi_deployments",
   "VITE_SSO_ENABLED": false,
   "VITE_SSO_ISSUER": "",
   "VITE_PASSWORD_LOGIN_DISABLED": false,

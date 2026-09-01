@@ -50,7 +50,7 @@ import { useRef, useState } from 'react';
 import type { JSX } from 'react';
 import { useNavigate, Outlet, NavLink } from 'react-router';
 import Logo from '../components/Logo';
-import { BarChart3, Bell, Building, ChevronDown, ChevronRight, FlaskConical, Layers, LayoutDashboard, LogOut, Plus, ScrollText, Search, Server, Shield, Sliders, User as UserIcon, Workflow, X, FileClock } from '@wso2/oxygen-ui-icons-react';
+import { BarChart3, Bell, Building, ChevronDown, ChevronRight, FlaskConical, Layers, LayoutDashboard, LogOut, Plus, Rocket, ScrollText, Search, Server, Shield, Sliders, User as UserIcon, Workflow, X, FileClock } from '@wso2/oxygen-ui-icons-react';
 import { useProjectByHandler, useProjects, useComponents, useAllEnvironments } from '../api/queries';
 import { useMultiEnvRuntimeStatusSubscription } from '../api/subscriptions';
 import { useNotificationPreferences } from '../hooks/useNotificationPreferences';
@@ -73,6 +73,7 @@ const SIDEBAR_ICONS: Record<Resource, JSX.Element> = {
   metrics: <BarChart3 size={20} />,
   runtimes: <Server size={20} />,
   environments: <Layers size={20} />,
+  deployments: <Rocket size={20} />,
   'access-control': <Shield size={20} />,
   'audit-logs': <FileClock size={20} />,
 };
@@ -81,7 +82,7 @@ const SIDEBAR_CATEGORIES: { label: string; resources: Resource[] }[] = [
   { label: '', resources: ['overview', 'workflows', 'test', 'runtimes'] },
   { label: 'Observability', resources: ['logs', 'loggers', 'metrics'] },
   { label: 'Infrastructure', resources: ['environments'] },
-  { label: 'Management', resources: ['audit-logs', 'access-control'] },
+  { label: 'Management', resources: ['deployments', 'audit-logs', 'access-control'] },
 ];
 
 export default function AppLayout(): JSX.Element {
@@ -159,6 +160,8 @@ export default function AppLayout(): JSX.Element {
         return 'environments';
       case 'audit-logs':
         return 'audit-logs';
+      case 'deployments':
+        return hasOrgPermission(Permissions.DEPLOYMENT_VIEW) || hasOrgPermission(Permissions.DEPLOYMENT_MANAGE) ? 'deployments' : 'overview';
     }
   };
 
@@ -171,6 +174,7 @@ export default function AppLayout(): JSX.Element {
   }
   const canSeeAccessControl = hasAnyPermission(accessControlPerms, projectId || undefined, componentId);
   const canSeeAuditLogs = scope.level === 'organizations' && hasOrgPermission(Permissions.AUDIT_VIEW);
+  const canSeeDeployments = scope.level === 'organizations' && (hasOrgPermission(Permissions.DEPLOYMENT_VIEW) || hasOrgPermission(Permissions.DEPLOYMENT_MANAGE));
   // Two integration-level entries depend on the integration's type, and each stays hidden until
   // `currentComponent` resolves — the same way access control waits on its permissions — so neither is
   // offered and then withdrawn once the type is known.
@@ -184,6 +188,7 @@ export default function AppLayout(): JSX.Element {
   const items = sidebarItems(scope, resource)
     .filter((item) => item.resource !== 'access-control' || canSeeAccessControl)
     .filter((item) => item.resource !== 'audit-logs' || canSeeAuditLogs)
+    .filter((item) => item.resource !== 'deployments' || canSeeDeployments)
     .filter((item) => item.resource !== 'workflows' || showWorkflows)
     .filter((item) => item.resource !== 'test' || showTest);
 

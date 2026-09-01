@@ -48,6 +48,19 @@ function initRuntimeScheduler() returns error? {
             log:printInfo("Audit log cleanup job scheduled successfully", intervalSeconds = auditLogCleanupIntervalSeconds);
         }
     }
+
+    worker miDeploymentRecoveryWorker {
+        task:JobId|error id = task:scheduleJobRecurByFrequency(new MIDeploymentRecoveryJob(), <decimal>schedulerIntervalSeconds);
+        if (id is error) { log:printError("Failed to schedule MI deployment recovery job", id); }
+    }
+}
+
+class MIDeploymentRecoveryJob {
+    *task:Job;
+    public function execute() {
+        error? e = storage:recoverMIDeploymentLeases();
+        if (e is error) { log:printError("Failed to recover MI deployment leases", e); }
+    }
 }
 
 class AuditLogCleanupJob {

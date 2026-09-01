@@ -31,6 +31,7 @@ interface RuntimeConfig {
   VITE_MI_APPLICATIONS_URL?: string;
   VITE_MI_SERVER_URL?: string;
   VITE_MI_REGISTRY_URL?: string;
+  VITE_MI_DEPLOYMENTS_URL?: string;
   VITE_WS_URL?: string;
   VITE_SSO_ENABLED?: boolean;
   VITE_SSO_ISSUER?: string;
@@ -48,6 +49,7 @@ export interface ApiConfig {
   miApplicationsUrl: string;
   miServerUrl: string;
   miRegistryUrl: string;
+  miDeploymentsUrl: string;
   wsUrl: string;
   ssoEnabled: boolean;
   ssoIssuer: string;
@@ -73,6 +75,7 @@ const DEFAULT_CONFIG: ApiConfig = {
   miApplicationsUrl: 'https://localhost:9446/icp/mi_applications',
   miServerUrl: 'https://localhost:9446/icp/mi_server',
   miRegistryUrl: 'https://localhost:9446/icp/mi_registry',
+  miDeploymentsUrl: 'https://localhost:9446/icp/mi_deployments',
   wsUrl: 'wss://localhost:9446/runtime-status',
   ssoEnabled: false,
   ssoIssuer: '',
@@ -103,6 +106,7 @@ export async function loadConfig(): Promise<void> {
       miApplicationsUrl: config.VITE_MI_APPLICATIONS_URL || DEFAULT_CONFIG.miApplicationsUrl,
       miServerUrl: config.VITE_MI_SERVER_URL || DEFAULT_CONFIG.miServerUrl,
       miRegistryUrl: config.VITE_MI_REGISTRY_URL || DEFAULT_CONFIG.miRegistryUrl,
+      miDeploymentsUrl: config.VITE_MI_DEPLOYMENTS_URL || DEFAULT_CONFIG.miDeploymentsUrl,
       wsUrl: config.VITE_WS_URL || DEFAULT_CONFIG.wsUrl,
       ssoEnabled: config.VITE_SSO_ENABLED ?? DEFAULT_CONFIG.ssoEnabled,
       ssoIssuer: config.VITE_SSO_ISSUER || DEFAULT_CONFIG.ssoIssuer,

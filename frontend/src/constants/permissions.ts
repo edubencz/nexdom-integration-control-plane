@@ -1,4 +1,7 @@
 export const Permissions = {
+  // Organization deployment orchestration
+  DEPLOYMENT_VIEW: 'deployment_mgt:view',
+  DEPLOYMENT_MANAGE: 'deployment_mgt:manage',
   // Integration Management
   INTEGRATION_VIEW: 'integration_mgt:view',
   INTEGRATION_EDIT: 'integration_mgt:edit',

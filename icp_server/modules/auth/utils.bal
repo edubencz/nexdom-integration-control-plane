@@ -29,6 +29,8 @@ import icp_server.types as types;
 public const string PERMISSION_INTEGRATION_VIEW = "integration_mgt:view";
 public const string PERMISSION_INTEGRATION_EDIT = "integration_mgt:edit";
 public const string PERMISSION_INTEGRATION_MANAGE = "integration_mgt:manage";
+public const string PERMISSION_DEPLOYMENT_VIEW = "deployment_mgt:view";
+public const string PERMISSION_DEPLOYMENT_MANAGE = "deployment_mgt:manage";
 
 // Environment Management Permissions
 public const string PERMISSION_ENVIRONMENT_MANAGE = "environment_mgt:manage";
