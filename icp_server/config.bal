@@ -95,6 +95,7 @@ configurable string backendTryitEndpoint = publicBaseUrl + "/icp/tryit";
 configurable string backendMiApplicationsEndpoint = publicBaseUrl + "/icp/mi_applications";
 configurable string backendMiServerEndpoint = publicBaseUrl + "/icp/mi_server";
 configurable string backendMiRegistryEndpoint = publicBaseUrl + "/icp/mi_registry";
+configurable string backendMiDeploymentsEndpoint = publicBaseUrl + "/icp/mi_deployments";
 
 // WebSocket endpoint — shares the main HTTPS port so no separate cert trust is needed
 configurable string backendWsUrl = toWsScheme(publicBaseUrl) + "/runtime-status";
@@ -142,6 +143,13 @@ configurable boolean enableAuditLogging = true;
 configurable string auditLogFilePath = "../logs/audit.log";
 configurable int auditLogRetentionDays = 90;
 configurable int auditLogCleanupIntervalSeconds = 86400;
+// Organization-wide MI Carbon Application deployment controls.
+configurable int miDeploymentMaxConcurrentProjects = 10;
+configurable int miDeploymentMaxCarSizeBytes = 104857600;
+configurable int miDeploymentVerifyAttempts = 10;
+configurable int miDeploymentVerifyIntervalSeconds = 4;
+configurable int miDeploymentArtifactRetentionDays = 7;
+configurable int miDeploymentHistoryRetentionDays = 90;
 configurable boolean enableMetrics = true;
 
 // Observability Adapter configuration

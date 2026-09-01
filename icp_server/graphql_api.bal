@@ -27,6 +27,35 @@ import ballerina/lang.value;
 import ballerina/log;
 import ballerina/url;
 
+// Keep the GraphQL input distinct from the storage/domain type. The latter is
+// also exposed as an output type and cannot be reused as a GraphQL input.
+type EnvironmentCreateInput record {
+    string name;
+    string environmentHandler;
+    string description?;
+    boolean critical;
+    string createdBy?;
+};
+
+type ComponentCreateInput record {
+    string projectId;
+    string name;
+    string displayName?;
+    string description?;
+    int orgId?;
+    string orgHandler?;
+    types:RuntimeType? componentType?;
+    string technology?;
+    string displayType?;
+    string componentSubType?;
+    string repository?;
+    string branch?;
+    string directoryPath?;
+    string secretRef?;
+    boolean isPublicRepo?;
+    string createdBy?;
+};
+
 // GraphQL listener configuration
 listener graphql:Listener graphqlListener = new (httpListener);
 
@@ -2138,7 +2167,7 @@ service /graphql on graphqlListener {
 
     // ----------- Environment Resources
     // Create a new environment (super admin only)
-    isolated remote function createEnvironment(graphql:Context context, types:EnvironmentInput environment) returns types:Environment|error? {
+    isolated remote function createEnvironment(graphql:Context context, EnvironmentCreateInput environment) returns types:Environment|error? {
         types:UserContextV2 userContext = check extractUserContext(context);
 
         // Build org-level scope for permission check
@@ -2161,7 +2190,14 @@ service /graphql on graphqlListener {
         environment.createdBy = userContext.userId;
 
         // Call storage layer to insert environments
-        types:Environment? created = check storage:createEnvironment(environment);
+        types:EnvironmentInput storageInput = {
+            name: environment.name,
+            environmentHandler: environment.environmentHandler,
+            description: environment.description,
+            critical: environment.critical,
+            createdBy: environment.createdBy
+        };
+        types:Environment? created = check storage:createEnvironment(storageInput);
         if created is types:Environment {
             storage:logAuditEvent(storage:AUDIT_ENVIRONMENT_CREATE, userId = userContext.userId,
                     resourceType = storage:AUDIT_RESOURCE_ENVIRONMENT, resourceId = created.id,
@@ -2565,7 +2601,7 @@ service /graphql on graphqlListener {
 
     // ----------- Component Resources
     // Create a new component
-    isolated remote function createComponent(graphql:Context context, types:ComponentInput component) returns types:Component|error? {
+    isolated remote function createComponent(graphql:Context context, ComponentCreateInput component) returns types:Component|error? {
         types:UserContextV2 userContext = check extractUserContext(context);
 
         // Build scope at project level (creating integration in a project)
@@ -2594,7 +2630,15 @@ service /graphql on graphqlListener {
         // Set the createdBy field to the current user's ID
         component.createdBy = userContext.userId;
 
-        types:Component|error? result = storage:createComponent(component);
+        types:ComponentInput componentInput = {
+            projectId: component.projectId, name: component.name, displayName: component.displayName,
+            description: component.description, orgId: component.orgId, orgHandler: component.orgHandler,
+            componentType: component?.componentType, technology: component?.technology, displayType: component?.displayType,
+            componentSubType: component?.componentSubType, repository: component?.repository, branch: component?.branch,
+            directoryPath: component?.directoryPath, secretRef: component?.secretRef, isPublicRepo: component?.isPublicRepo,
+            createdBy: component.createdBy
+        };
+        types:Component|error? result = storage:createComponent(componentInput);
         if result is error {
             string errMsg = result.message();
             if errMsg.includes("Unique index") || errMsg.includes("unique index") || errMsg.includes("23505") {

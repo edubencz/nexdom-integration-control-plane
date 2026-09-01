@@ -40,6 +40,7 @@ import Profile from '../pages/Profile';
 import ForceChangePassword from '../pages/ForceChangePassword';
 import ManageLoggers from '../pages/ManageLoggers';
 import AuditLogs from '../pages/AuditLogs';
+import Deployments from '../pages/Deployments';
 import { ScopeResolver, generateMatrixRoutes, withScope, type Matrix } from '../nav';
 import { createElement } from 'react';
 import ErrorPage from '../pages/Error';
@@ -58,6 +59,7 @@ const MATRIX: Matrix = {
   runtimes: { segment: 'runtimes', pages: { organizations: OrgRuntimes, projects: Runtime, components: Runtime } },
   environments: { segment: 'environments', pages: { organizations: Environments, projects: Environments } },
   'audit-logs': { segment: 'audit-logs', pages: { organizations: AuditLogs } },
+  deployments: { segment: 'deployments', pages: { organizations: Deployments } },
   'access-control': { segment: 'settings/access-control/:tab', pages: { organizations: OrgAccessControl, projects: ProjectAccessControl, components: ComponentAccessControl } },
 };
 

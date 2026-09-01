@@ -39,7 +39,8 @@ public enum PermissionDomain {
     OBSERVABILITY_MANAGEMENT = "Observability-Management",
     USER_MANAGEMENT = "User-Management",
     WORKFLOW_MANAGEMENT = "Workflow-Management",
-    AUDIT_MANAGEMENT = "Audit-Management"
+    AUDIT_MANAGEMENT = "Audit-Management",
+    DEPLOYMENT_MANAGEMENT = "Deployment-Management"
 }
 
 // === Core RBAC V2 Database Record Types ===
