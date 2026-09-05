@@ -370,7 +370,14 @@ function EnvironmentRuntimeCard({
 
   return (
     <>
-      <Card variant="outlined" sx={{ mb: 3 }}>
+      <Card
+        variant="outlined"
+        sx={{
+          mb: 3,
+          width: { xs: '100%', lg: 'calc(100% + 64px)' },
+          ml: { xs: 0, lg: '-32px' },
+          maxWidth: 'none',
+        }}>
         <CardContent>
           <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 2 }}>
             <Stack direction="row" alignItems="center" gap={1}>
@@ -415,9 +422,36 @@ function EnvironmentRuntimeCard({
             </Typography>
           ) : (
             <>
-              <ListingTable>
-                <ListingTable.Head>
-                  <ListingTable.Row>
+              <Box sx={{ width: '100%', maxWidth: '100%', overflowX: 'hidden', pb: 0.5 }}>
+                <ListingTable
+                  sx={{
+                    width: '100%',
+                    minWidth: { xs: 0, lg: 1240 },
+                    tableLayout: 'fixed',
+                    '& th, & td': {
+                      verticalAlign: 'top',
+                    },
+                    '& th': {
+                      whiteSpace: { xs: 'normal', lg: 'nowrap' },
+                    },
+                    '& td': {
+                      overflowWrap: 'anywhere',
+                      wordBreak: 'break-word',
+                    },
+                    '& tr > :nth-child(1)': { width: '10%' },
+                    '& tr > :nth-child(2)': { width: '9%' },
+                    '& tr > :nth-child(3)': { width: '6%' },
+                    '& tr > :nth-child(4)': { width: '9%' },
+                    '& tr > :nth-child(5)': { width: '9%', whiteSpace: 'nowrap' },
+                    '& tr > :nth-child(6)': { width: '7%' },
+                    '& tr > :nth-child(7)': { width: '10%' },
+                    '& tr > :nth-child(8)': { width: '7%' },
+                    '& tr > :nth-child(9)': { width: '12%' },
+                    '& tr > :nth-child(10)': { width: '11%' },
+                    '& tr > :nth-child(11)': { width: '10%', whiteSpace: 'nowrap' },
+                  }}>
+                  <ListingTable.Head>
+                    <ListingTable.Row>
                     <ListingTable.Cell>
                       <ListingTable.SortLabel
                         active={sort.key === 'runtimeName'}
@@ -485,11 +519,11 @@ function EnvironmentRuntimeCard({
                       </ListingTable.SortLabel>
                     </ListingTable.Cell>
                     <ListingTable.Cell>Actions</ListingTable.Cell>
-                  </ListingTable.Row>
-                </ListingTable.Head>
-                <ListingTable.Body>
-                  {paged.map((r) => (
-                    <ListingTable.Row key={r.runtimeId}>
+                    </ListingTable.Row>
+                  </ListingTable.Head>
+                  <ListingTable.Body>
+                    {paged.map((r) => (
+                      <ListingTable.Row key={r.runtimeId}>
                       <ListingTable.Cell>{r.runtimeName || r.runtimeId}</ListingTable.Cell>
                       <ListingTable.Cell>{r.runtimeId}</ListingTable.Cell>
                       <ListingTable.Cell>{technologyLabel(r.runtimeType)}</ListingTable.Cell>
@@ -521,10 +555,11 @@ function EnvironmentRuntimeCard({
                           </IconButton>
                         </Stack>
                       </ListingTable.Cell>
-                    </ListingTable.Row>
-                  ))}
-                </ListingTable.Body>
-              </ListingTable>
+                      </ListingTable.Row>
+                    ))}
+                  </ListingTable.Body>
+                </ListingTable>
+              </Box>
               <TablePagination
                 sx={{ borderTop: '1px solid', borderColor: 'divider', mt: 1 }}
                 component="div"

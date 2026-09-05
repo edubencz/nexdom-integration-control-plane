@@ -288,3 +288,15 @@ public type RegistryPropertiesResponse record {
     int count;
     RegistryProperty[] properties;
 };
+
+public type RegistrySearchItem record {
+    string name;
+    string path;
+    string mediaType;
+    boolean isDirectory;
+};
+
+public type RegistrySearchResponse record {
+    int count;
+    RegistrySearchItem[] items;
+};

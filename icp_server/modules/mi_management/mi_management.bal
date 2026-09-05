@@ -546,6 +546,67 @@ public isolated function fetchRegistryDirectory(http:Client mgmtClient, string h
     return {count: respResult.count, items: items};
 }
 
+public isolated function flattenRegistrySearchNode(json node, string parentPath, string searchKey) returns types:RegistrySearchItem[] {
+    types:RegistrySearchItem[] results = [];
+    if node !is map<json> {
+        return results;
+    }
+
+    json? nameValue = node["name"];
+    string name = nameValue is string ? nameValue : "";
+    json? typeValue = node["type"];
+    string nodeType = typeValue is string ? typeValue : "";
+    json? mediaTypeValue = node["mediaType"];
+    string mediaType = mediaTypeValue is string ? mediaTypeValue : nodeType;
+    boolean isDirectory = nodeType == "directory" || node["files"] is json[];
+    string currentPath = name == "" ? parentPath : parentPath == "" ? name : string `${parentPath}/${name}`;
+
+    if name != "" && name.toLowerAscii().includes(searchKey.toLowerAscii()) {
+        results.push({
+            name: name,
+            path: currentPath,
+            mediaType: isDirectory ? "directory" : mediaType,
+            isDirectory: isDirectory
+        });
+    }
+
+    json? children = node["files"];
+    if children is json[] {
+        foreach json child in children {
+            results.push(...flattenRegistrySearchNode(child, currentPath, searchKey));
+        }
+    }
+    return results;
+}
+
+// Search registry resources recursively below a registry path.
+// The MI endpoint returns a nested tree for searchKey; flatten it for GraphQL consumers.
+public isolated function fetchRegistryResourceSearch(http:Client mgmtClient, string hmacToken, string path, string searchKey) returns types:RegistrySearchResponse|error {
+    string encodedPath = check url:encode(path, "UTF-8");
+    string encodedSearchKey = check url:encode(searchKey, "UTF-8");
+    string apiPath = string `${MGMT_API_PATH}/registry-resources?path=${encodedPath}&searchKey=${encodedSearchKey}`;
+    log:printDebug("Calling MI management API", path = apiPath);
+    json respJson = check mgmtClient->get(apiPath, {
+        [HEADER_AUTHORIZATION]: string `Bearer ${hmacToken}`,
+        [HEADER_ACCEPT]: CONTENT_TYPE_JSON
+    });
+
+    types:RegistrySearchItem[] items = [];
+    if respJson is map<json> {
+        json? listValue = respJson["list"];
+        int slashIndex = path.lastIndexOf("/") ?: -1;
+        string parentPath = slashIndex >= 0 ? path.substring(0, slashIndex) : "";
+        if listValue is map<json> {
+            items = flattenRegistrySearchNode(listValue, parentPath, searchKey);
+        } else if listValue is json[] {
+            foreach json item in listValue {
+                items.push(...flattenRegistrySearchNode(item, path, searchKey));
+            }
+        }
+    }
+    return {count: items.length(), items: items};
+}
+
 // Fetch registry file content from the MI management API
 // GET /management/registry-resources/content?path={path}
 public isolated function fetchRegistryFileContent(http:Client mgmtClient, string hmacToken, string path) returns string|error {

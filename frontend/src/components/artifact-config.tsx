@@ -20,14 +20,18 @@ import { Globe, Link2, ListOrdered, Clock, FolderArchive, Package, Plug, FileTex
 import type { JSX } from 'react';
 import type { GqlArtifact } from '../api/queries';
 
+const ARTIFACT_DISPLAY_NAMES: Record<string, string> = {
+  CompositeApp: 'Carbon Applications',
+};
+
 /** Format artifact type name for display: "RestApi" → "Rest Api" */
 export function formatArtifactTypeName(t: string): string {
-  return t.replace(/([a-z])([A-Z])/g, '$1 $2');
+  return ARTIFACT_DISPLAY_NAMES[t] ?? t.replace(/([a-z])([A-Z])/g, '$1 $2');
 }
 
 /** "RestApi" → "Rest Api(s)", "ProxyService" → "Proxy Service(s)" */
 export function typePlural(t: string): string {
-  return t.replace(/([a-z])([A-Z])/g, '$1 $2') + '(s)';
+  return ARTIFACT_DISPLAY_NAMES[t] ?? `${t.replace(/([a-z])([A-Z])/g, '$1 $2')}(s)`;
 }
 
 export const ARTIFACT_ICONS: Record<string, JSX.Element> = {

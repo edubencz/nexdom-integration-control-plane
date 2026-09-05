@@ -97,7 +97,9 @@ function proxyMIApplications(string componentId, string environmentId, string ru
         if encodedAppName is error {
             return miApplicationsError(400, "Invalid Carbon Application name");
         }
-        suffix = "/" + encodedAppName;
+        suffix = request.method == http:GET
+            ? "?carbonAppName=" + encodedAppName
+            : "/" + encodedAppName;
     }
     http:Response|error response = clientResult->forward("/management/applications" + suffix, request);
     if response is error {
@@ -119,6 +121,9 @@ function proxyMIApplications(string componentId, string environmentId, string ru
 service /icp/mi_applications on httpListener {
     resource function get [string componentId]/[string environmentId]/[string runtimeId](http:Caller caller, http:Request request) returns error? {
         check caller->respond(proxyMIApplications(componentId, environmentId, runtimeId, [], request));
+    }
+    resource function get [string componentId]/[string environmentId]/[string runtimeId]/[string appName](http:Caller caller, http:Request request) returns error? {
+        check caller->respond(proxyMIApplications(componentId, environmentId, runtimeId, [appName], request));
     }
     resource function post [string componentId]/[string environmentId]/[string runtimeId](http:Caller caller, http:Request request) returns error? {
         check caller->respond(proxyMIApplications(componentId, environmentId, runtimeId, [], request));

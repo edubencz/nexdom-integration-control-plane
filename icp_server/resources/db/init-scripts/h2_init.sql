@@ -502,7 +502,7 @@ WHERE
 
 -- Insert default organization (required for foreign key constraints)
 INSERT INTO organizations (org_id, org_name, org_handle)
-VALUES (1, 'Default Organization', 'default');
+VALUES (1, 'NEXDOM Healthtech', 'default');
 
 -- Insert pre-defined roles
 INSERT INTO roles_v2 (role_id, role_name, org_id, description) VALUES

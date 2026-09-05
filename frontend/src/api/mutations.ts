@@ -209,7 +209,7 @@ export interface CreateComponentInput {
 }
 
 const CREATE_COMPONENT = `
-  mutation CreateComponent($component: ComponentInput!) {
+  mutation CreateComponent($component: ComponentCreateInput!) {
     createComponent(component: $component) {
       id, name, displayName, handler, orgId, projectId, createdAt, updatedAt
     }

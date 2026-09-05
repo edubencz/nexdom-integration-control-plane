@@ -1960,6 +1960,17 @@ service /graphql on graphqlListener {
         return check mi_management:fetchRegistryDirectory(apiClient.mgmtClient, apiClient.hmacToken, validated.trimmedPath, expand);
     }
 
+    isolated resource function get registryResourceSearch(graphql:Context context, string runtimeId, string path, string searchKey) returns types:RegistrySearchResponse|error {
+        types:UserContextV2 userContext = check extractUserContext(context);
+        string trimmedSearchKey = searchKey.trim();
+        if trimmedSearchKey == "" {
+            return error("Search key is required");
+        }
+        types:ValidatedRegistryAccess validated = check validateRegistryResourceAccess(userContext, runtimeId, path, "registry resource search");
+        types:RegistryApiClient apiClient = check mi_management:createRegistryManagementClient(validated.runtime, runtimeId, artifactsApiAllowInsecureTLS);
+        return check mi_management:fetchRegistryResourceSearch(apiClient.mgmtClient, apiClient.hmacToken, validated.trimmedPath, trimmedSearchKey);
+    }
+
     isolated resource function get registryFileContent(graphql:Context context, string runtimeId, string path) returns string|error {
         types:UserContextV2 userContext = check extractUserContext(context);
         types:ValidatedRegistryAccess validated = check validateRegistryResourceAccess(userContext, runtimeId, path, "registry file content");

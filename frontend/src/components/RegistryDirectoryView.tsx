@@ -17,8 +17,8 @@
  */
 
 import { type JSX } from 'react';
-import { Box, ListingTable, Typography, Chip, IconButton, Tooltip } from '@wso2/oxygen-ui';
-import { Folder, FileText, Trash2 } from '@wso2/oxygen-ui-icons-react';
+import { Box, ListingTable, Typography, Chip, IconButton, Tooltip, Stack } from '@wso2/oxygen-ui';
+import { Folder, FileText, Trash2, Eye, Download } from '@wso2/oxygen-ui-icons-react';
 import type { GqlRegistryDirectoryItem } from '../api/queries';
 
 interface RegistryDirectoryViewProps {
@@ -27,9 +27,11 @@ interface RegistryDirectoryViewProps {
   onSelectFile: (item: GqlRegistryDirectoryItem) => void;
   canEdit?: boolean;
   onDeleteFile?: (item: GqlRegistryDirectoryItem) => void;
+  onDownloadFile?: (item: GqlRegistryDirectoryItem) => void;
+  selectedPath?: string;
 }
 
-export function RegistryDirectoryView({ items, onNavigateInto, onSelectFile, canEdit = false, onDeleteFile }: RegistryDirectoryViewProps): JSX.Element {
+export function RegistryDirectoryView({ items, onNavigateInto, onSelectFile, canEdit = false, onDeleteFile, onDownloadFile, selectedPath }: RegistryDirectoryViewProps): JSX.Element {
   const handleItemClick = (item: GqlRegistryDirectoryItem) => {
     if (item.isDirectory) {
       onNavigateInto(item.name);
@@ -57,42 +59,81 @@ export function RegistryDirectoryView({ items, onNavigateInto, onSelectFile, can
         <ListingTable.Row>
           <ListingTable.Cell sx={{ width: '50%' }}>Name</ListingTable.Cell>
           <ListingTable.Cell sx={{ width: '30%' }}>Type</ListingTable.Cell>
-          <ListingTable.Cell sx={{ width: '15%' }}>Properties</ListingTable.Cell>
-          {canEdit && <ListingTable.Cell sx={{ width: '5%' }} />}
+          {(canEdit || onDownloadFile) && <ListingTable.Cell sx={{ width: '12%' }} />}
         </ListingTable.Row>
       </ListingTable.Head>
       <ListingTable.Body>
-        {items.map((item) => (
-          <ListingTable.Row
-            key={item.name}
-            onClick={() => handleItemClick(item)}
-            sx={{
-              cursor: 'pointer',
-              '&:hover': {
-                backgroundColor: 'action.hover',
-              },
-            }}>
-            <ListingTable.Cell>
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                {item.isDirectory ? <Folder size={18} color="primary" /> : <FileText size={18} />}
-                <Typography variant="body2" sx={{ fontWeight: item.isDirectory ? 500 : 400 }}>
-                  {item.name}
-                </Typography>
-              </Box>
-            </ListingTable.Cell>
-            <ListingTable.Cell>
-              <Chip label={getMediaTypeDisplay(item.mediaType)} size="small" variant="outlined" />
-            </ListingTable.Cell>
-            <ListingTable.Cell>
-              <Typography variant="body2" color="text.secondary">
-                {item.properties.length > 0 ? `${item.properties.length} properties` : ''}
-              </Typography>
-            </ListingTable.Cell>
-            {canEdit && <ListingTable.Cell align="right">
-              {!item.isDirectory && onDeleteFile && <Tooltip title="Delete resource"><IconButton size="small" aria-label={`Delete ${item.name}`} onClick={(event) => { event.stopPropagation(); onDeleteFile(item); }}><Trash2 size={16} /></IconButton></Tooltip>}
-            </ListingTable.Cell>}
-          </ListingTable.Row>
-        ))}
+        {[...items]
+          .sort((a, b) => Number(b.isDirectory) - Number(a.isDirectory) || a.name.localeCompare(b.name))
+          .map((item) => (
+            <ListingTable.Row
+              key={`${item.path || item.name}-${item.isDirectory ? 'directory' : 'resource'}`}
+              onClick={() => handleItemClick(item)}
+              sx={{
+                cursor: 'pointer',
+                backgroundColor: selectedPath && selectedPath === item.path ? 'action.selected' : undefined,
+                '&:hover': {
+                  backgroundColor: 'action.hover',
+                },
+              }}>
+              <ListingTable.Cell>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                  {item.isDirectory ? <Folder size={18} color="primary" /> : <FileText size={18} />}
+                  <Typography variant="body2" sx={{ fontWeight: item.isDirectory ? 500 : 400 }}>
+                    {item.name}
+                  </Typography>
+                </Box>
+              </ListingTable.Cell>
+              <ListingTable.Cell>
+                <Chip label={getMediaTypeDisplay(item.mediaType)} size="small" variant="outlined" />
+              </ListingTable.Cell>
+              {(canEdit || onDownloadFile) && (
+                <ListingTable.Cell align="right">
+                  {!item.isDirectory && (
+                    <Stack direction="row" justifyContent="flex-end" spacing={0.25}>
+                      <Tooltip title="View resource">
+                        <IconButton
+                          size="small"
+                          aria-label={`View ${item.name}`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onSelectFile(item);
+                          }}>
+                          <Eye size={16} />
+                        </IconButton>
+                      </Tooltip>
+                      {onDownloadFile && (
+                        <Tooltip title="Download resource">
+                          <IconButton
+                            size="small"
+                            aria-label={`Download ${item.name}`}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              onDownloadFile(item);
+                            }}>
+                            <Download size={16} />
+                          </IconButton>
+                        </Tooltip>
+                      )}
+                      {canEdit && onDeleteFile && (
+                        <Tooltip title="Delete resource">
+                          <IconButton
+                            size="small"
+                            aria-label={`Delete ${item.name}`}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              onDeleteFile(item);
+                            }}>
+                            <Trash2 size={16} />
+                          </IconButton>
+                        </Tooltip>
+                      )}
+                    </Stack>
+                  )}
+                </ListingTable.Cell>
+              )}
+            </ListingTable.Row>
+          ))}
       </ListingTable.Body>
     </ListingTable>
   );

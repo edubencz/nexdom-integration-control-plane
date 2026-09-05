@@ -188,6 +188,16 @@ class RuntimeLogsScenariosTest extends BaseObservabilityE2ETest {
         }
         componentCard.getByRole(AriaRole.BUTTON, new Locator.GetByRoleOptions().setName("Supporting Artifacts")).click();
         page.waitForTimeout(1_000);
+        componentCard.getByRole(AriaRole.BUTTON, new Locator.GetByRoleOptions().setName("Registry Resource")).click();
+        assertThat(page.getByRole(AriaRole.TEXTBOX, new Page.GetByRoleOptions().setName("Search Registry Resources"))).isVisible();
+        assertThat(page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("maximize"))).isVisible();
+        page.getByRole(AriaRole.ROW, new Page.GetByRoleOptions().setName("config directory")).click();
+        assertThat(page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Up"))).isVisible();
+        assertThat(page.getByRole(AriaRole.NAVIGATION, new Page.GetByRoleOptions().setName("registry path navigation"))).isVisible();
+        page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("maximize")).click();
+        assertThat(page.locator(".MuiDrawer-paper").last()).isVisible();
+        page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("restore")).click();
+        page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("close")).last().click();
         assertThat(page.getByRole(AriaRole.HEADING, new Page.GetByRoleOptions().setName(miComponent))).isVisible();
     }
 
