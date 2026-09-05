@@ -187,7 +187,11 @@ public isolated function cleanupAuditLogs(int retentionDays) returns error? {
     time:Utc cutoff = time:utcAddSeconds(time:utcNow(), -retentionDays * 86400);
     time:Civil civil = time:utcToCivil(cutoff);
     string cutoffText = string `${civil.year}-${civil.month.toString().padStart(2, "0")}-${civil.day.toString().padStart(2, "0")}T${civil.hour.toString().padStart(2, "0")}:${civil.minute.toString().padStart(2, "0")}:00Z`;
-    sql:ExecutionResult|sql:Error result = dbClient->execute(`DELETE FROM audit_logs WHERE event_source = 'CONTROL_PLANE' AND timestamp < ${cutoffText}`);
+    sql:ParameterizedQuery cleanupQuery = sql:queryConcat(
+        `DELETE FROM audit_logs WHERE event_source = 'CONTROL_PLANE' AND timestamp < `,
+        sqlQueryFromString(timestampCast(cutoffText))
+    );
+    sql:ExecutionResult|sql:Error result = dbClient->execute(cleanupQuery);
     if result is sql:Error {
         return result;
     }
@@ -202,7 +206,7 @@ isolated boolean auditEnabled = false;
 isolated boolean auditFileDraining = false;
 type AuditEvent record {|
     string timestamp;
-    string? orgId;
+    int orgId;
     string action;
     string? userId;
     string? actorUsername;
@@ -278,7 +282,7 @@ public isolated function logAuditEvent(
     AuditEvent event = {
         timestamp: timestamp,
         action: action,
-        orgId: "1",
+        orgId: 1,
         userId: userId,
         actorUsername: resolvedActor,
         resourceType: resourceType,

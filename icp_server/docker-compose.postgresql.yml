@@ -16,18 +16,19 @@
 
 services:
   postgresql-db:
-    build:
-      context: ./resources/db
-      dockerfile: Dockerfile.postgresql
+    image: postgres:latest
     ports:
       - "5432:5432"
-    container_name: icp-postgresql-local
+    container_name: Nexdom-ICP-DB
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: my-secret-pw
-      POSTGRES_DB: icp_database
+      POSTGRES_PASSWORD: NexdomICP@2026
+      POSTGRES_DB: nexdom
+    volumes:
+      - ./resources/db/init-scripts/postgresql_init.sql:/docker-entrypoint-initdb.d/01-postgresql-init.sql:ro
+      - ./resources/db/migration-scripts/add_mi_deployments_feature_postgresql.sql:/docker-entrypoint-initdb.d/02-add-mi-deployments-feature.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d icp_database"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d nexdom"]
       interval: 5s
       timeout: 5s
       retries: 30
