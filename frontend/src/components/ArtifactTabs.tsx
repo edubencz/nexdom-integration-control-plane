@@ -799,31 +799,51 @@ export function MessageProcessorParameters({ artifact, envId, componentId }: Tab
 
 export function ArtifactCarbonArtifacts({ artifact }: TabProps) {
   const artifacts = (artifact.artifacts as Array<{ name: string; type: string }> | undefined) ?? [];
+  const version = artifact.version?.toString() || '—';
+  const state = artifact.state?.toString() || 'Unknown';
+  const isFaulty = state.toLowerCase() === 'faulty';
   return (
-    <ListingTable>
-      <ListingTable.Head>
-        <ListingTable.Row>
-          <ListingTable.Cell>Artifact Name</ListingTable.Cell>
-          <ListingTable.Cell>Artifact Type</ListingTable.Cell>
-        </ListingTable.Row>
-      </ListingTable.Head>
-      <ListingTable.Body>
-        {artifacts.length === 0 ? (
+    <Stack gap={2}>
+      <Stack direction={{ xs: 'column', sm: 'row' }} gap={3}>
+        <Box>
+          <Typography variant="caption" color="text.secondary">Version</Typography>
+          <Typography variant="body2" sx={{ fontWeight: 600 }}>{version}</Typography>
+        </Box>
+        <Box>
+          <Typography variant="caption" color="text.secondary">Status</Typography>
+          <Box><Chip label={state} size="small" color={isFaulty ? 'error' : 'success'} /></Box>
+        </Box>
+        <Box>
+          <Typography variant="caption" color="text.secondary">Included artifacts</Typography>
+          <Typography variant="body2" sx={{ fontWeight: 600 }}>{artifacts.length}</Typography>
+        </Box>
+      </Stack>
+      <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>Included artifacts</Typography>
+      <ListingTable>
+        <ListingTable.Head>
           <ListingTable.Row>
-            <ListingTable.Cell colSpan={2} align="center" sx={emptySx}>
-              No artifacts found.
-            </ListingTable.Cell>
+            <ListingTable.Cell>Artifact Name</ListingTable.Cell>
+            <ListingTable.Cell>Artifact Type</ListingTable.Cell>
           </ListingTable.Row>
-        ) : (
-          artifacts.map((a, i) => (
-            <ListingTable.Row key={i}>
-              <ListingTable.Cell>{a.name}</ListingTable.Cell>
-              <ListingTable.Cell>{a.type}</ListingTable.Cell>
+        </ListingTable.Head>
+        <ListingTable.Body>
+          {artifacts.length === 0 ? (
+            <ListingTable.Row>
+              <ListingTable.Cell colSpan={2} align="center" sx={emptySx}>
+                No artifacts found.
+              </ListingTable.Cell>
             </ListingTable.Row>
-          ))
-        )}
-      </ListingTable.Body>
-    </ListingTable>
+          ) : (
+            artifacts.map((a, i) => (
+              <ListingTable.Row key={i}>
+                <ListingTable.Cell>{a.name}</ListingTable.Cell>
+                <ListingTable.Cell><Chip label={a.type} size="small" variant="outlined" /></ListingTable.Cell>
+              </ListingTable.Row>
+            ))
+          )}
+        </ListingTable.Body>
+      </ListingTable>
+    </Stack>
   );
 }
 

@@ -438,7 +438,7 @@ INSERT INTO
     organizations (org_id, org_name, org_handle)
 VALUES (
         1,
-        'Default Organization',
+        'NEXDOM Healthtech',
         'default'
     );
 

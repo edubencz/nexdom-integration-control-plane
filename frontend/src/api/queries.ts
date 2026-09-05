@@ -1061,6 +1061,8 @@ export interface GqlRegistryDirectoryItem {
   mediaType: string;
   isDirectory: boolean;
   properties: GqlRegistryProperty[];
+  /** Present for search results; direct directory listings derive it from the current path. */
+  path?: string;
 }
 
 export interface GqlRegistryDirectoryResponse {
@@ -1076,6 +1078,18 @@ export interface GqlRegistryResourceMetadata {
 export interface GqlRegistryPropertiesResponse {
   count: number;
   properties: GqlRegistryProperty[];
+}
+
+export interface GqlRegistrySearchItem {
+  name: string;
+  path: string;
+  mediaType: string;
+  isDirectory: boolean;
+}
+
+export interface GqlRegistrySearchResponse {
+  count: number;
+  items: GqlRegistrySearchItem[];
 }
 
 const REGISTRY_DIRECTORY_QUERY = `
@@ -1097,6 +1111,19 @@ const REGISTRY_DIRECTORY_QUERY = `
 const REGISTRY_FILE_CONTENT_QUERY = `
   query RegistryFileContent($runtimeId: String!, $path: String!) {
     registryFileContent(runtimeId: $runtimeId, path: $path)
+  }`;
+
+const REGISTRY_RESOURCE_SEARCH_QUERY = `
+  query RegistryResourceSearch($runtimeId: String!, $path: String!, $searchKey: String!) {
+    registryResourceSearch(runtimeId: $runtimeId, path: $path, searchKey: $searchKey) {
+      count
+      items {
+        name
+        path
+        mediaType
+        isDirectory
+      }
+    }
   }`;
 
 const REGISTRY_RESOURCE_METADATA_QUERY = `
@@ -1128,6 +1155,20 @@ export function useRegistryDirectory(runtimeId: string, path: string, expand = f
         expand,
       }).then((d) => d.registryDirectory),
     enabled: !!runtimeId && !!path,
+  });
+}
+
+export function useRegistryResourceSearch(runtimeId: string, path: string, searchKey: string, enabled = true) {
+  const normalizedSearchKey = searchKey.trim();
+  return useQuery({
+    queryKey: ['registryResourceSearch', runtimeId, path, normalizedSearchKey],
+    queryFn: () =>
+      gql<{ registryResourceSearch: GqlRegistrySearchResponse }>(REGISTRY_RESOURCE_SEARCH_QUERY, {
+        runtimeId,
+        path,
+        searchKey: normalizedSearchKey,
+      }).then((d) => d.registryResourceSearch),
+    enabled: enabled && !!runtimeId && !!path && normalizedSearchKey.length >= 2,
   });
 }
 

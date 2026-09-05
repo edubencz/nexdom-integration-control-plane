@@ -231,7 +231,7 @@ export default function AppLayout(): JSX.Element {
                     <ComplexSelect.MenuItem.Icon>
                       <Building />
                     </ComplexSelect.MenuItem.Icon>
-                    <ComplexSelect.MenuItem.Text primary="Default Organization" secondary="Organization" />
+                    <ComplexSelect.MenuItem.Text primary="NEXDOM Healthtech" secondary="Organization" />
                   </>
                 )}
                 label="Organizations">
@@ -239,7 +239,7 @@ export default function AppLayout(): JSX.Element {
                   <ComplexSelect.MenuItem.Icon>
                     <Building />
                   </ComplexSelect.MenuItem.Icon>
-                  <ComplexSelect.MenuItem.Text primary="Default Organization" secondary="Organization" />
+                  <ComplexSelect.MenuItem.Text primary="NEXDOM Healthtech" secondary="Organization" />
                 </ComplexSelect.MenuItem>
               </ComplexSelect>
             </Box>

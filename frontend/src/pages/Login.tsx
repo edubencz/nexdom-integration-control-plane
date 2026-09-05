@@ -61,14 +61,6 @@ export default function Login(): JSX.Element {
               width="auto"
               style={{ alignSelf: 'flex-start' }}
             />
-            <Typography variant="h3" component="h1" sx={{ textAlign: 'left', width: '100%' }}>
-              Get Started with WSO2 Integration Platform
-            </Typography>
-            <Box sx={{ maxWidth: 520, width: '100%' }}>
-              <Typography variant="body1" sx={{ color: 'text.secondary', textAlign: 'left', width: '100%' }}>
-                A centralized platform for controlling, managing, and observing your integration solutions with confidence and scale.
-              </Typography>
-            </Box>
           </Stack>
           <Box
             sx={{

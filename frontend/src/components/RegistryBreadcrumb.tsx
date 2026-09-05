@@ -17,8 +17,8 @@
  */
 
 import { type JSX } from 'react';
-import { Breadcrumbs, Link, Typography } from '@wso2/oxygen-ui';
-import { ChevronRight } from '@wso2/oxygen-ui-icons-react';
+import { Box, Breadcrumbs, IconButton, Link, Tooltip, Typography } from '@wso2/oxygen-ui';
+import { ChevronRight, Copy } from '@wso2/oxygen-ui-icons-react';
 
 interface RegistryBreadcrumbProps {
   pathSegments: string[];
@@ -26,42 +26,48 @@ interface RegistryBreadcrumbProps {
 }
 
 export function RegistryBreadcrumb({ pathSegments, onNavigate }: RegistryBreadcrumbProps): JSX.Element {
-  // If we're at registry root, just show it as current location
-  if (pathSegments.length === 1 && pathSegments[0] === 'registry') {
-    return (
-      <Breadcrumbs separator={<ChevronRight size={16} />} aria-label="registry path navigation">
-        <Typography variant="body2" color="text.primary" sx={{ fontWeight: 500 }}>
-          Registry
-        </Typography>
-      </Breadcrumbs>
-    );
-  }
+  const fullPath = pathSegments.join('/');
+  const isCollapsed = pathSegments.length > 4;
+  const visibleSegments = isCollapsed
+    ? [{ segment: pathSegments[0], index: 0 }, { segment: '…', index: -1 }, ...pathSegments.slice(-2).map((segment, offset) => ({ segment, index: pathSegments.length - 2 + offset }))]
+    : pathSegments.map((segment, index) => ({ segment, index }));
 
   return (
-    <Breadcrumbs separator={<ChevronRight size={16} />} aria-label="registry path navigation">
-      {pathSegments.map((segment, index) => {
-        const isLast = index === pathSegments.length - 1;
-        const displayName = segment === 'registry' ? 'Registry' : segment;
-
-        return isLast ? (
-          <Typography key={index} variant="body2" color="text.primary" sx={{ fontWeight: 500 }}>
-            {displayName}
-          </Typography>
-        ) : (
-          <Link
-            key={index}
-            component="button"
-            variant="body2"
-            onClick={() => onNavigate(index)}
-            sx={{
-              cursor: 'pointer',
-              textDecoration: 'none',
-              '&:hover': { textDecoration: 'underline' },
-            }}>
-            {displayName}
-          </Link>
-        );
-      })}
-    </Breadcrumbs>
+    <Box sx={{ display: 'flex', alignItems: 'center', minWidth: 0 }}>
+      <Tooltip title={fullPath} placement="bottom-start">
+        <Breadcrumbs separator={<ChevronRight size={16} />} aria-label="registry path navigation" sx={{ minWidth: 0, overflow: 'hidden', '& ol': { flexWrap: 'nowrap' } }}>
+          {visibleSegments.map(({ segment, index }, visibleIndex) => {
+            const isLast = visibleIndex === visibleSegments.length - 1;
+            const displayName = segment === 'registry' ? 'Registry' : segment;
+            if (index < 0) {
+              return (
+                <Typography key="ellipsis" variant="body2" color="text.secondary">
+                  …
+                </Typography>
+              );
+            }
+            return isLast ? (
+              <Typography key={index} variant="body2" color="text.primary" sx={{ fontWeight: 500, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {displayName}
+              </Typography>
+            ) : (
+              <Link
+                key={index}
+                component="button"
+                variant="body2"
+                onClick={() => onNavigate(index)}
+                sx={{ cursor: 'pointer', textDecoration: 'none', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', '&:hover': { textDecoration: 'underline' } }}>
+                {displayName}
+              </Link>
+            );
+          })}
+        </Breadcrumbs>
+      </Tooltip>
+      <Tooltip title="Copy path">
+        <IconButton size="small" aria-label="Copy registry path" onClick={() => void navigator.clipboard?.writeText(fullPath)} sx={{ ml: 0.5 }}>
+          <Copy size={14} />
+        </IconButton>
+      </Tooltip>
+    </Box>
   );
 }

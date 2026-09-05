@@ -10,6 +10,14 @@ export interface RegistryMutationResponse {
   [key: string]: unknown;
 }
 
+function getRegistryContentType(mediaType: string, fileName?: string): string {
+  // MI's registry API may expose Java properties resources with a custom media
+  // type such as "application.properties" or "property file". Sending that
+  // value as the HTTP Content-Type makes MI try to parse the plain text body as
+  // XML. Keep the resource media type for creation, but send its body as text.
+  return /properties|property[\s-]*file/i.test(`${mediaType} ${fileName || ''}`) ? 'text/plain' : mediaType || 'text/plain';
+}
+
 async function registryResponse(response: Response): Promise<RegistryMutationResponse> {
   const raw = await response.text();
   let payload: RegistryMutationResponse = {};
@@ -27,14 +35,16 @@ async function registryResponse(response: Response): Promise<RegistryMutationRes
 
 export async function createRegistryResource(componentId: string, environmentId: string, runtimeId: string, path: string, mediaType: string, content: string | Blob, fileName?: string) {
   const isBinary = content instanceof Blob;
-  const body = isBinary ? (() => {
-    const form = new FormData();
-    form.append('file', content, fileName || 'resource');
-    return form;
-  })() : content;
+  const body = isBinary
+    ? (() => {
+        const form = new FormData();
+        form.append('file', content, fileName || 'resource');
+        return form;
+      })()
+    : content;
   const response = await authenticatedFetch(miRegistryApiUrl(componentId, environmentId, runtimeId, 'content', { path, mediaType }), {
     method: 'POST',
-    ...(isBinary ? {} : { headers: { 'Content-Type': mediaType || 'text/plain' } }),
+    ...(isBinary ? {} : { headers: { 'Content-Type': getRegistryContentType(mediaType, fileName) } }),
     body,
   });
   return registryResponse(response);
@@ -42,14 +52,16 @@ export async function createRegistryResource(componentId: string, environmentId:
 
 export async function updateRegistryResource(componentId: string, environmentId: string, runtimeId: string, path: string, mediaType: string, content: string | Blob, fileName?: string) {
   const isBinary = content instanceof Blob;
-  const body = isBinary ? (() => {
-    const form = new FormData();
-    form.append('file', content, fileName || 'resource');
-    return form;
-  })() : content;
+  const body = isBinary
+    ? (() => {
+        const form = new FormData();
+        form.append('file', content, fileName || 'resource');
+        return form;
+      })()
+    : content;
   const response = await authenticatedFetch(miRegistryApiUrl(componentId, environmentId, runtimeId, 'content', { path }), {
     method: 'PUT',
-    ...(isBinary ? {} : { headers: { 'Content-Type': mediaType || 'text/plain' } }),
+    ...(isBinary ? {} : { headers: { 'Content-Type': getRegistryContentType(mediaType, fileName || path) } }),
     body,
   });
   return registryResponse(response);
@@ -77,7 +89,7 @@ export async function deleteRegistryProperty(componentId: string, environmentId:
 export async function downloadRegistryResource(componentId: string, environmentId: string, runtimeId: string, path: string): Promise<Blob> {
   const response = await authenticatedFetch(miRegistryApiUrl(componentId, environmentId, runtimeId, 'content', { path }));
   if (!response.ok) {
-    const payload = await response.json().catch(() => ({})) as { error?: { message?: string } };
+    const payload = (await response.json().catch(() => ({}))) as { error?: { message?: string } };
     throw new Error(payload.error?.message || `Registry download failed with HTTP ${response.status}.`);
   }
   return response.blob();

@@ -70,6 +70,7 @@ import { RegistryBrowser } from './RegistryBrowser';
 import { authenticatedFetch } from '../auth/tokenManager';
 import { miApplicationsApiUrl } from '../config/api';
 import { ServerManagementPanel } from './ServerManagementPanel';
+import { useLayout } from '../contexts/LayoutContext';
 
 /**
  * Normalizes state/tracing/statistics values to a boolean.
@@ -269,17 +270,17 @@ function SelectedTypeArtifacts({
 
           return (
             <Card key={i} variant="outlined" sx={{ cursor: 'pointer', width: '100%', '&:hover': { boxShadow: 1 } }} onClick={() => onSelect(a)}>
-              <CardContent sx={{ display: 'flex', alignItems: 'center', py: 1.5, '&:last-child': { pb: 1.5 } }}>
-                <Grid container spacing={2} sx={{ flex: 1 }}>
+              <CardContent sx={{ display: 'flex', alignItems: 'flex-start', minWidth: 0, py: 1.5, '&:last-child': { pb: 1.5 } }}>
+                <Grid container spacing={2} sx={{ flex: 1, minWidth: 0, alignItems: 'flex-start' }}>
                   {columns.map((col, colIndex) => {
                     // Distribute extra columns to first N data columns to reach exactly 12
                     const columnSize = dataColumnSize + (colIndex < extraColumns ? 1 : 0);
                     return (
-                      <Grid key={col} size={{ xs: columnSize }}>
+                      <Grid key={col} size={{ xs: columnSize }} sx={{ minWidth: 0 }}>
                         <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'capitalize' }}>
                           {col === 'size' ? 'Message Count' : col}
                         </Typography>
-                        <Typography variant="body2" sx={{ fontWeight: 500 }}>
+                        <Typography variant="body2" sx={{ fontWeight: 500, overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
                           {(a[col] ?? '—').toString()}
                         </Typography>
                       </Grid>
@@ -366,6 +367,12 @@ interface CarbonApplication {
   name: string;
   version?: string;
   state?: 'active' | 'faulty';
+  artifacts?: CarbonApplicationArtifact[];
+}
+
+interface CarbonApplicationArtifact {
+  name: string;
+  type: string;
 }
 
 type DeletePhase = 'confirm' | 'deleting' | 'verifying' | 'collectingLogs' | 'success' | 'pending' | 'error';
@@ -426,6 +433,24 @@ function carbonApplicationsFromPayload(payload: unknown): CarbonApplication[] {
   }));
 }
 
+function carbonApplicationDetailsFromPayload(payload: unknown, fallback: CarbonApplication): CarbonApplication {
+  if (!payload || typeof payload !== 'object') return fallback;
+  const response = payload as { name?: unknown; version?: unknown; artifacts?: unknown };
+  const artifacts = Array.isArray(response.artifacts)
+    ? response.artifacts.filter((artifact): artifact is CarbonApplicationArtifact => {
+        if (!artifact || typeof artifact !== 'object') return false;
+        const candidate = artifact as { name?: unknown; type?: unknown };
+        return typeof candidate.name === 'string' && typeof candidate.type === 'string';
+      })
+    : fallback.artifacts;
+  return {
+    ...fallback,
+    name: typeof response.name === 'string' ? response.name : fallback.name,
+    version: typeof response.version === 'string' ? response.version : fallback.version,
+    artifacts,
+  };
+}
+
 function isSameCarbonApplication(candidate: CarbonApplication, target: CarbonApplication): boolean {
   const candidateName = candidate.name.replace(/\.car$/i, '');
   const targetName = target.name.replace(/\.car$/i, '');
@@ -442,9 +467,7 @@ function responseMessage(payload: unknown): string | undefined {
 function carbonApplicationMatchesFile(app: CarbonApplication, fileName: string): boolean {
   const stem = fileName.replace(/\.car$/i, '').toLowerCase();
   const name = app.name.replace(/\.car$/i, '').toLowerCase();
-  const candidates = [name, app.version ? `${name}-${app.version}` : '', app.version ? `${name}_${app.version}` : '']
-    .filter(Boolean)
-    .flatMap((candidate) => [candidate, `${candidate}.car`]);
+  const candidates = [name, app.version ? `${name}-${app.version}` : '', app.version ? `${name}_${app.version}` : ''].filter(Boolean).flatMap((candidate) => [candidate, `${candidate}.car`]);
   return candidates.includes(stem) || candidates.includes(`${stem}.car`);
 }
 
@@ -452,10 +475,13 @@ function relatedCarbonLogLines(content: string, fileName: string): string[] {
   const stem = fileName.replace(/\.car$/i, '').toLowerCase();
   const baseName = stem.replace(/[-_]\d+\.\d.*$/, '');
   const terms = [stem, stem.replace(/-/g, '_'), baseName, baseName.replace(/-/g, '_')];
-  return content.split(/\r?\n/).filter((line) => {
-    const normalized = line.toLowerCase();
-    return normalized.includes('carbon application') && terms.some((term) => normalized.includes(term));
-  }).slice(-5);
+  return content
+    .split(/\r?\n/)
+    .filter((line) => {
+      const normalized = line.toLowerCase();
+      return normalized.includes('carbon application') && terms.some((term) => normalized.includes(term));
+    })
+    .slice(-5);
 }
 
 async function collectAddLogEvidence(runtimeId: string, operation: AddOperation): Promise<{ lines: string[]; isNewEvidence: boolean; error?: string }> {
@@ -470,9 +496,14 @@ async function collectAddLogEvidence(runtimeId: string, operation: AddOperation)
   }
 }
 
-function carbonApplicationFileName(app: CarbonApplication): string {
+function carbonApplicationFileNames(app: CarbonApplication): string[] {
   const applicationName = app.name.replace(/\.car$/i, '');
-  return app.version ? `${applicationName}-${app.version}` : applicationName;
+  if (!app.version) return [applicationName];
+  return [...new Set([`${applicationName}-${app.version}`, `${applicationName}_${app.version}`])];
+}
+
+function carbonApplicationFileName(app: CarbonApplication): string {
+  return carbonApplicationFileNames(app)[0];
 }
 
 function CarbonApplicationsPanel({ envId, projectId, componentId, onSelectArtifact }: { envId: string; projectId: string; componentId: string; onSelectArtifact: (a: GqlArtifact, type: string, envId: string) => void }) {
@@ -487,6 +518,7 @@ function CarbonApplicationsPanel({ envId, projectId, componentId, onSelectArtifa
   const [addFeedback, setAddFeedback] = useState<AddFeedback | null>(null);
   const [applicationToDelete, setApplicationToDelete] = useState<CarbonApplication | null>(null);
   const [deleteFeedback, setDeleteFeedback] = useState<DeleteFeedback | null>(null);
+  const [loadingApplication, setLoadingApplication] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const addOperationRef = useRef<AddOperation | null>(null);
 
@@ -517,44 +549,92 @@ function CarbonApplicationsPanel({ envId, projectId, componentId, onSelectArtifa
     }
   }, [fetchApplications, runtimeId]);
 
-  useEffect(() => { void loadApplications(); }, [loadApplications]);
+  useEffect(() => {
+    void loadApplications();
+  }, [loadApplications]);
 
-  const verifyAdd = useCallback(async (responseDetails?: Pick<AddFeedback, 'httpStatus' | 'responseMessage' | 'rawResponse'>) => {
-    const operation = addOperationRef.current;
-    if (!operation) return;
-    const wasAlreadyPresent = operation.baselineApplicationsKnown && operation.baselineApplications.some((app) => carbonApplicationMatchesFile(app, operation.fileName));
+  const selectApplication = async (app: CarbonApplication) => {
+    if (!runtimeId) return;
+    const applicationKey = `${app.name}-${app.version ?? ''}`;
+    setLoadingApplication(applicationKey);
+    setError(null);
+    try {
+      const response = await authenticatedFetch(miApplicationsApiUrl(componentId, envId, runtimeId, app.name));
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(responseMessage(payload) || `GET application details failed with HTTP ${response.status}.`);
 
-    setAddFeedback((previous) => previous ? { ...previous, ...responseDetails, phase: 'verifying', verificationAttempts: 0 } : previous);
-    for (let attempt = 1; attempt <= STATUS_VERIFY_ATTEMPTS; attempt += 1) {
-      try {
-        const currentApplications = await fetchApplications();
-        const matchingApplication = currentApplications.find((app) => carbonApplicationMatchesFile(app, operation.fileName));
-        if (matchingApplication?.state === 'faulty') {
-          setAddFeedback((previous) => previous ? { ...previous, ...responseDetails, phase: 'collectingLogs', verificationAttempts: attempt } : previous);
-          const logResult = await collectAddLogEvidence(runtimeId, operation);
-          setAddFeedback((previous) => previous ? { ...previous, ...responseDetails, phase: 'faulty', verificationAttempts: attempt, logLines: logResult.lines, logError: logResult.error } : previous);
+      const details = carbonApplicationDetailsFromPayload(payload, app);
+      const runtime = miRuntimes.find((candidate) => candidate.runtimeId === runtimeId);
+      const artifact = {
+        name: details.name,
+        version: details.version,
+        state: details.state === 'faulty' ? 'Faulty' : 'Active',
+        artifacts: details.artifacts ?? [],
+        runtimes: runtime ? [{ runtimeId: runtime.runtimeId, runtimeName: runtime.runtimeName, status: runtime.status }] : [],
+      } as GqlArtifact;
+      onSelectArtifact(artifact, 'CompositeApp', envId);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load Carbon Application details.');
+    } finally {
+      setLoadingApplication(null);
+    }
+  };
+
+  const verifyAdd = useCallback(
+    async (responseDetails?: Pick<AddFeedback, 'httpStatus' | 'responseMessage' | 'rawResponse'>) => {
+      const operation = addOperationRef.current;
+      if (!operation) return;
+      const wasAlreadyPresent = operation.baselineApplicationsKnown && operation.baselineApplications.some((app) => carbonApplicationMatchesFile(app, operation.fileName));
+
+      setAddFeedback((previous) => (previous ? { ...previous, ...responseDetails, phase: 'verifying', verificationAttempts: 0 } : previous));
+      for (let attempt = 1; attempt <= STATUS_VERIFY_ATTEMPTS; attempt += 1) {
+        try {
+          const currentApplications = await fetchApplications();
+          const matchingApplication = currentApplications.find((app) => carbonApplicationMatchesFile(app, operation.fileName));
+          if (matchingApplication?.state === 'faulty') {
+            setAddFeedback((previous) => (previous ? { ...previous, ...responseDetails, phase: 'collectingLogs', verificationAttempts: attempt } : previous));
+            const logResult = await collectAddLogEvidence(runtimeId, operation);
+            setAddFeedback((previous) => (previous ? { ...previous, ...responseDetails, phase: 'faulty', verificationAttempts: attempt, logLines: logResult.lines, logError: logResult.error } : previous));
+            return;
+          }
+          if (matchingApplication?.state === 'active') {
+            const logResult = await collectAddLogEvidence(runtimeId, operation);
+            const redeployConfirmed = !wasAlreadyPresent || (operation.baselineLogKnown && logResult.isNewEvidence);
+            if (redeployConfirmed) {
+              setAddFeedback((previous) => (previous ? { ...previous, ...responseDetails, phase: 'success', verificationAttempts: attempt, logLines: logResult.lines, logError: logResult.error } : previous));
+              return;
+            }
+            if (attempt === STATUS_VERIFY_ATTEMPTS) {
+              setAddFeedback((previous) =>
+                previous
+                  ? {
+                      ...previous,
+                      ...responseDetails,
+                      phase: 'pending',
+                      verificationAttempts: attempt,
+                      logLines: logResult.lines,
+                      logError: logResult.error,
+                      errorMessage: operation.baselineLogKnown
+                        ? 'The application is Active, but no new deployment log entry was found for this redeploy.'
+                        : 'The application is Active, but the pre-upload log could not be captured, so this redeploy cannot be confirmed.',
+                    }
+                  : previous,
+              );
+              return;
+            }
+          }
+        } catch (e) {
+          setAddFeedback((previous) =>
+            previous ? { ...previous, ...responseDetails, phase: 'pending', verificationAttempts: attempt, errorMessage: e instanceof Error ? e.message : 'Unable to verify Carbon Application deployment.', retryableVerification: true } : previous,
+          );
           return;
         }
-        if (matchingApplication?.state === 'active') {
-          const logResult = await collectAddLogEvidence(runtimeId, operation);
-          const redeployConfirmed = !wasAlreadyPresent || (operation.baselineLogKnown && logResult.isNewEvidence);
-          if (redeployConfirmed) {
-            setAddFeedback((previous) => previous ? { ...previous, ...responseDetails, phase: 'success', verificationAttempts: attempt, logLines: logResult.lines, logError: logResult.error } : previous);
-            return;
-          }
-          if (attempt === STATUS_VERIFY_ATTEMPTS) {
-            setAddFeedback((previous) => previous ? { ...previous, ...responseDetails, phase: 'pending', verificationAttempts: attempt, logLines: logResult.lines, logError: logResult.error, errorMessage: operation.baselineLogKnown ? 'The application is Active, but no new deployment log entry was found for this redeploy.' : 'The application is Active, but the pre-upload log could not be captured, so this redeploy cannot be confirmed.' } : previous);
-            return;
-          }
-        }
-      } catch (e) {
-        setAddFeedback((previous) => previous ? { ...previous, ...responseDetails, phase: 'pending', verificationAttempts: attempt, errorMessage: e instanceof Error ? e.message : 'Unable to verify Carbon Application deployment.', retryableVerification: true } : previous);
-        return;
+        setAddFeedback((previous) => (previous ? { ...previous, phase: 'verifying', verificationAttempts: attempt } : previous));
+        if (attempt < STATUS_VERIFY_ATTEMPTS) await delay(STATUS_VERIFY_INTERVAL_MS);
       }
-      setAddFeedback((previous) => previous ? { ...previous, phase: 'verifying', verificationAttempts: attempt } : previous);
-      if (attempt < STATUS_VERIFY_ATTEMPTS) await delay(STATUS_VERIFY_INTERVAL_MS);
-    }
-  }, [fetchApplications, runtimeId]);
+    },
+    [fetchApplications, runtimeId],
+  );
 
   const confirmAddApplication = async () => {
     if (!runtimeId || !fileToAdd) return;
@@ -564,10 +644,7 @@ function CarbonApplicationsPanel({ envId, projectId, componentId, onSelectArtifa
     setError(null);
     setAddFeedback({ phase: 'preparing', ...fileDetails });
     try {
-      const [applicationsResult, logResult] = await Promise.allSettled([
-        fetchApplications(),
-        fetchLogFileContent(runtimeId, 'wso2carbon.log'),
-      ]);
+      const [applicationsResult, logResult] = await Promise.allSettled([fetchApplications(), fetchLogFileContent(runtimeId, 'wso2carbon.log')]);
       const baselineApplications = applicationsResult.status === 'fulfilled' ? applicationsResult.value : [];
       const baselineLogKnown = logResult.status === 'fulfilled';
       addOperationRef.current = {
@@ -588,7 +665,11 @@ function CarbonApplicationsPanel({ envId, projectId, componentId, onSelectArtifa
       });
       const rawResponse = await response.text();
       let payload: unknown = {};
-      try { payload = rawResponse ? JSON.parse(rawResponse) : {}; } catch { /* keep raw response */ }
+      try {
+        payload = rawResponse ? JSON.parse(rawResponse) : {};
+      } catch {
+        /* keep raw response */
+      }
       const details = { ...fileDetails, httpStatus: response.status, responseMessage: responseMessage(payload), rawResponse: rawResponse || '(empty response)' };
       if (!response.ok) {
         setAddFeedback({ phase: 'error', ...details, errorMessage: responseMessage(payload) || `POST failed with HTTP ${response.status}.`, retryableVerification: false });
@@ -606,11 +687,15 @@ function CarbonApplicationsPanel({ envId, projectId, componentId, onSelectArtifa
   const verifyAddStatus = async () => {
     if (!addOperationRef.current) return;
     setBusy(true);
-    await verifyAdd(addFeedback ? {
-      httpStatus: addFeedback.httpStatus,
-      responseMessage: addFeedback.responseMessage,
-      rawResponse: addFeedback.rawResponse,
-    } : undefined);
+    await verifyAdd(
+      addFeedback
+        ? {
+            httpStatus: addFeedback.httpStatus,
+            responseMessage: addFeedback.responseMessage,
+            rawResponse: addFeedback.rawResponse,
+          }
+        : undefined,
+    );
     setBusy(false);
   };
 
@@ -628,67 +713,86 @@ function CarbonApplicationsPanel({ envId, projectId, componentId, onSelectArtifa
     setDeleteFeedback({ phase: 'confirm' });
   };
 
-  const collectDeleteLogEvidence = useCallback(async (app: CarbonApplication): Promise<{ lines: string[]; error?: string }> => {
-    try {
-      const content = await fetchLogFileContent(runtimeId, 'wso2carbon.log');
-      const baseName = app.name.replace(/\.car$/i, '');
-      const terms = [baseName, `${baseName}-${app.version ?? ''}`, `${baseName}_${app.version ?? ''}`, `${baseName}-${app.version ?? ''}.car`, `${baseName}_${app.version ?? ''}.car`]
-        .filter((term) => term.length > baseName.length || term === baseName)
-        .map((term) => term.toLowerCase());
-      const lines = content.split(/\r?\n/).filter((line) => {
-        const normalized = line.toLowerCase();
-        return normalized.includes('carbon application') && terms.some((term) => normalized.includes(term));
-      });
-      return { lines: lines.slice(-5) };
-    } catch (e) {
-      return { lines: [], error: e instanceof Error ? e.message : 'Unable to retrieve runtime log evidence.' };
-    }
-  }, [runtimeId]);
-
-  const verifyDelete = useCallback(async (app: CarbonApplication, responseDetails?: Pick<DeleteFeedback, 'httpStatus' | 'responseMessage' | 'rawResponse'>) => {
-    setDeleteFeedback({ phase: 'verifying', ...responseDetails, verificationAttempts: 0 });
-    for (let attempt = 1; attempt <= STATUS_VERIFY_ATTEMPTS; attempt += 1) {
+  const collectDeleteLogEvidence = useCallback(
+    async (app: CarbonApplication): Promise<{ lines: string[]; error?: string }> => {
       try {
-        const currentApplications = await fetchApplications();
-        const stillPresent = currentApplications.some((candidate) => isSameCarbonApplication(candidate, app));
-        if (!stillPresent) {
-          setDeleteFeedback({ phase: 'collectingLogs', ...responseDetails, verificationAttempts: attempt });
-          const evidence = await collectDeleteLogEvidence(app);
-          setDeleteFeedback({ phase: 'success', ...responseDetails, verificationAttempts: attempt, logLines: evidence.lines, logError: evidence.error });
+        const content = await fetchLogFileContent(runtimeId, 'wso2carbon.log');
+        const baseName = app.name.replace(/\.car$/i, '');
+        const terms = [baseName, `${baseName}-${app.version ?? ''}`, `${baseName}_${app.version ?? ''}`, `${baseName}-${app.version ?? ''}.car`, `${baseName}_${app.version ?? ''}.car`]
+          .filter((term) => term.length > baseName.length || term === baseName)
+          .map((term) => term.toLowerCase());
+        const lines = content.split(/\r?\n/).filter((line) => {
+          const normalized = line.toLowerCase();
+          return normalized.includes('carbon application') && terms.some((term) => normalized.includes(term));
+        });
+        return { lines: lines.slice(-5) };
+      } catch (e) {
+        return { lines: [], error: e instanceof Error ? e.message : 'Unable to retrieve runtime log evidence.' };
+      }
+    },
+    [runtimeId],
+  );
+
+  const verifyDelete = useCallback(
+    async (app: CarbonApplication, responseDetails?: Pick<DeleteFeedback, 'httpStatus' | 'responseMessage' | 'rawResponse'>) => {
+      setDeleteFeedback({ phase: 'verifying', ...responseDetails, verificationAttempts: 0 });
+      for (let attempt = 1; attempt <= STATUS_VERIFY_ATTEMPTS; attempt += 1) {
+        try {
+          const currentApplications = await fetchApplications();
+          const stillPresent = currentApplications.some((candidate) => isSameCarbonApplication(candidate, app));
+          if (!stillPresent) {
+            setDeleteFeedback({ phase: 'collectingLogs', ...responseDetails, verificationAttempts: attempt });
+            const evidence = await collectDeleteLogEvidence(app);
+            setDeleteFeedback({ phase: 'success', ...responseDetails, verificationAttempts: attempt, logLines: evidence.lines, logError: evidence.error });
+            return;
+          }
+        } catch (e) {
+          setDeleteFeedback({
+            phase: 'pending',
+            ...responseDetails,
+            verificationAttempts: attempt,
+            errorMessage: e instanceof Error ? e.message : 'Unable to verify Carbon Application removal.',
+          });
           return;
         }
-      } catch (e) {
-        setDeleteFeedback({
-          phase: 'pending',
-          ...responseDetails,
-          verificationAttempts: attempt,
-          errorMessage: e instanceof Error ? e.message : 'Unable to verify Carbon Application removal.',
-        });
-        return;
+        setDeleteFeedback((previous) => (previous ? { ...previous, phase: 'verifying', verificationAttempts: attempt } : previous));
+        if (attempt < STATUS_VERIFY_ATTEMPTS) await delay(STATUS_VERIFY_INTERVAL_MS);
       }
-      setDeleteFeedback((previous) => previous ? { ...previous, phase: 'verifying', verificationAttempts: attempt } : previous);
-      if (attempt < STATUS_VERIFY_ATTEMPTS) await delay(STATUS_VERIFY_INTERVAL_MS);
-    }
-    setDeleteFeedback((previous) => previous ? { ...previous, phase: 'pending' } : previous);
-  }, [collectDeleteLogEvidence, fetchApplications]);
+      setDeleteFeedback((previous) => (previous ? { ...previous, phase: 'pending' } : previous));
+    },
+    [collectDeleteLogEvidence, fetchApplications],
+  );
 
   const confirmDeleteApplication = async () => {
     if (!runtimeId || !applicationToDelete) return;
-    const fileName = carbonApplicationFileName(applicationToDelete);
+    const fileNames = carbonApplicationFileNames(applicationToDelete);
     setBusy(true);
     setError(null);
     setDeleteFeedback({ phase: 'deleting' });
     try {
-      const response = await authenticatedFetch(miApplicationsApiUrl(componentId, envId, runtimeId, fileName), { method: 'DELETE' });
-      const rawResponse = await response.text();
-      let payload: unknown = {};
-      try { payload = rawResponse ? JSON.parse(rawResponse) : {}; } catch { /* keep raw response */ }
-      const details = { httpStatus: response.status, responseMessage: responseMessage(payload), rawResponse: rawResponse || '(empty response)' };
-      if (!response.ok) {
-        setDeleteFeedback({ phase: 'error', ...details, errorMessage: responseMessage(payload) || `DELETE failed with HTTP ${response.status}.` });
+      for (let index = 0; index < fileNames.length; index += 1) {
+        const fileName = fileNames[index];
+        const response = await authenticatedFetch(miApplicationsApiUrl(componentId, envId, runtimeId, fileName), { method: 'DELETE' });
+        const rawResponse = await response.text();
+        let payload: unknown = {};
+        try {
+          payload = rawResponse ? JSON.parse(rawResponse) : {};
+        } catch {
+          /* keep raw response */
+        }
+        const details = { httpStatus: response.status, responseMessage: responseMessage(payload), rawResponse: rawResponse || '(empty response)' };
+        if (response.ok) {
+          await verifyDelete(applicationToDelete, details);
+          return;
+        }
+
+        const hasFallback = response.status === 404 && index < fileNames.length - 1;
+        if (hasFallback) continue;
+
+        const errorMessage = response.status === 404 && fileNames.length > 1 ? `DELETE failed with HTTP 404. Tried compatible names: ${fileNames.join(' and ')}.` : responseMessage(payload) || `DELETE failed with HTTP ${response.status}.`;
+        setDeleteFeedback({ phase: 'error', ...details, errorMessage });
         return;
       }
-      await verifyDelete(applicationToDelete, details);
     } catch (e) {
       setDeleteFeedback({ phase: 'error', errorMessage: e instanceof Error ? e.message : 'Failed to delete Carbon Application.' });
     } finally {
@@ -699,78 +803,194 @@ function CarbonApplicationsPanel({ envId, projectId, componentId, onSelectArtifa
   const verifyDeleteStatus = async () => {
     if (!applicationToDelete) return;
     setBusy(true);
-    await verifyDelete(applicationToDelete, deleteFeedback ? {
-      httpStatus: deleteFeedback.httpStatus,
-      responseMessage: deleteFeedback.responseMessage,
-      rawResponse: deleteFeedback.rawResponse,
-    } : undefined);
+    await verifyDelete(
+      applicationToDelete,
+      deleteFeedback
+        ? {
+            httpStatus: deleteFeedback.httpStatus,
+            responseMessage: deleteFeedback.responseMessage,
+            rawResponse: deleteFeedback.rawResponse,
+          }
+        : undefined,
+    );
     setBusy(false);
   };
 
-  if (miRuntimes.length === 0) return <Typography color="text.secondary" sx={{ py: 4 }}>No running MI runtime found for this environment.</Typography>;
+  if (miRuntimes.length === 0)
+    return (
+      <Typography color="text.secondary" sx={{ py: 4 }}>
+        No running MI runtime found for this environment.
+      </Typography>
+    );
   return (
     <Stack gap={2}>
       <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} alignItems={{ sm: 'center' }}>
         <Stack direction="row" gap={1} alignItems="center" sx={{ flex: 1 }}>
           <Server size={16} />
-          <Typography variant="body2" color="text.secondary">Runtime</Typography>
-          <select value={runtimeId} onChange={(e) => setRuntimeId(e.target.value)} disabled={busy || fileToAdd !== null} style={{ minWidth: 220, padding: '7px 10px', borderRadius: 4, border: '1px solid var(--oxygen-palette-divider)', background: 'transparent', color: 'inherit' }}>
-            {miRuntimes.map((r) => <option key={r.runtimeId} value={r.runtimeId}>{r.runtimeName || r.runtimeId}</option>)}
+          <Typography variant="body2" color="text.secondary">
+            Runtime
+          </Typography>
+          <select
+            value={runtimeId}
+            onChange={(e) => setRuntimeId(e.target.value)}
+            disabled={busy || fileToAdd !== null}
+            style={{ minWidth: 220, padding: '7px 10px', borderRadius: 4, border: '1px solid var(--oxygen-palette-divider)', background: 'transparent', color: 'inherit' }}>
+            {miRuntimes.map((r) => (
+              <option key={r.runtimeId} value={r.runtimeId}>
+                {r.runtimeName || r.runtimeId}
+              </option>
+            ))}
           </select>
         </Stack>
-        <Button size="small" variant="outlined" startIcon={<RefreshCw size={15} />} onClick={() => void loadApplications()} disabled={loading || busy}>{loading ? 'Loading…' : 'Refresh'}</Button>
-        <Button size="small" variant="contained" startIcon={<Upload size={15} />} onClick={() => inputRef.current?.click()} disabled={busy}>Add .car</Button>
-        <input ref={inputRef} hidden type="file" accept=".car,application/octet-stream" onChange={(e) => { const file = e.target.files?.[0]; if (file) { setFileToAdd(file); setAddFeedback({ phase: 'confirm', fileName: file.name, fileSize: file.size, runtimeId }); } }} />
+        <Button size="small" variant="outlined" startIcon={<RefreshCw size={15} />} onClick={() => void loadApplications()} disabled={loading || busy}>
+          {loading ? 'Loading…' : 'Refresh'}
+        </Button>
+        <Button size="small" variant="contained" startIcon={<Upload size={15} />} onClick={() => inputRef.current?.click()} disabled={busy}>
+          Add .car
+        </Button>
+        <input
+          ref={inputRef}
+          hidden
+          type="file"
+          accept=".car,application/octet-stream"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) {
+              setFileToAdd(file);
+              setAddFeedback({ phase: 'confirm', fileName: file.name, fileSize: file.size, runtimeId });
+            }
+          }}
+        />
       </Stack>
       {error && <Alert severity="error">{error}</Alert>}
-      {applications.length === 0 && !loading ? <Typography color="text.secondary" sx={{ py: 3, textAlign: 'center' }}>No Carbon Applications found.</Typography> : applications.map((app) => {
-        const artifact = { name: app.name, version: app.version, state: app.state === 'faulty' ? 'Faulty' : 'Active' } as GqlArtifact;
-        return <Card key={`${app.name}-${app.version ?? ''}`} variant="outlined"><CardContent sx={{ display: 'flex', alignItems: 'center', gap: 2, py: 1.5, '&:last-child': { pb: 1.5 } }}>
-          <Box sx={{ flex: 1, cursor: 'pointer' }} onClick={() => onSelectArtifact(artifact, 'CompositeApp', envId)}><Typography variant="body2" sx={{ fontWeight: 600 }}>{app.name}</Typography><Typography variant="caption" color="text.secondary">Version {app.version || '—'} · {app.state === 'faulty' ? 'Faulty' : 'Active'}</Typography></Box>
-          <IconButton size="small" color="error" aria-label={`Delete ${app.name}`} onClick={() => void deleteApplication(app)} disabled={busy}><Trash2 size={16} /></IconButton>
-        </CardContent></Card>;
-      })}
+      {applications.length === 0 && !loading ? (
+        <Typography color="text.secondary" sx={{ py: 3, textAlign: 'center' }}>
+          No Carbon Applications found.
+        </Typography>
+      ) : (
+        applications.map((app) => {
+          const applicationKey = `${app.name}-${app.version ?? ''}`;
+          return (
+            <Card key={applicationKey} variant="outlined">
+              <CardContent sx={{ display: 'flex', alignItems: 'center', gap: 2, py: 1.5, '&:last-child': { pb: 1.5 } }}>
+                <Box sx={{ flex: 1, cursor: loadingApplication === applicationKey ? 'wait' : 'pointer' }} onClick={() => void selectApplication(app)} role="button" tabIndex={0} aria-label={`View details for ${app.name}`}>
+                  <Stack direction="row" alignItems="center" gap={1}>
+                    <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                      {app.name}
+                    </Typography>
+                    {loadingApplication === applicationKey && <CircularProgress size={14} />}
+                  </Stack>
+                  <Typography variant="caption" color="text.secondary">
+                    Version {app.version || '—'} · {app.state === 'faulty' ? 'Faulty' : 'Active'}
+                  </Typography>
+                </Box>
+                <IconButton size="small" color="error" aria-label={`Delete ${app.name}`} onClick={() => void deleteApplication(app)} disabled={busy}>
+                  <Trash2 size={16} />
+                </IconButton>
+              </CardContent>
+            </Card>
+          );
+        })
+      )}
       <Dialog open={fileToAdd !== null} onClose={closeAddDialog} maxWidth="sm" fullWidth>
         <DialogTitle>
           {addFeedback?.phase === 'success' ? 'Carbon Application deployed' : addFeedback?.phase === 'faulty' ? 'Carbon Application deployment failed' : addFeedback?.phase === 'pending' ? 'Deployment not yet confirmed' : 'Add Carbon Application'}
         </DialogTitle>
         <DialogContent>
-          {fileToAdd && <Stack gap={0.5} sx={{ mb: 2 }}>
-            <Typography variant="body2" color="text.secondary" sx={{ wordBreak: 'break-word' }}>{fileToAdd.name}</Typography>
-            <Typography variant="caption" color="text.secondary">{(fileToAdd.size / 1024).toFixed(1)} KB · Runtime: {runtimeId}</Typography>
-          </Stack>}
-          {!addFeedback || addFeedback.phase === 'confirm' ? <Typography>Do you want to upload this Carbon Application to the selected runtime?</Typography> : (
+          {fileToAdd && (
+            <Stack gap={0.5} sx={{ mb: 2 }}>
+              <Typography variant="body2" color="text.secondary" sx={{ wordBreak: 'break-word' }}>
+                {fileToAdd.name}
+              </Typography>
+              <Typography variant="caption" color="text.secondary">
+                {(fileToAdd.size / 1024).toFixed(1)} KB · Runtime: {runtimeId}
+              </Typography>
+            </Stack>
+          )}
+          {!addFeedback || addFeedback.phase === 'confirm' ? (
+            <Typography>Do you want to upload this Carbon Application to the selected runtime?</Typography>
+          ) : (
             <Stack gap={1.5}>
-              {['preparing', 'uploading', 'verifying', 'collectingLogs'].includes(addFeedback.phase) && <Stack direction="row" alignItems="center" gap={1}>
-                <CircularProgress size={20} />
-                <Typography>
-                  {addFeedback.phase === 'preparing' ? 'Preparing deployment tracking…' : addFeedback.phase === 'uploading' ? 'Sending .car to the MI runtime…' : addFeedback.phase === 'verifying' ? `Checking deployment status (check ${addFeedback.verificationAttempts ?? 0}/${STATUS_VERIFY_ATTEMPTS})…` : 'Collecting new runtime log entries…'}
-                </Typography>
-              </Stack>}
+              {['preparing', 'uploading', 'verifying', 'collectingLogs'].includes(addFeedback.phase) && (
+                <Stack direction="row" alignItems="center" gap={1}>
+                  <CircularProgress size={20} />
+                  <Typography>
+                    {addFeedback.phase === 'preparing'
+                      ? 'Preparing deployment tracking…'
+                      : addFeedback.phase === 'uploading'
+                        ? 'Sending .car to the MI runtime…'
+                        : addFeedback.phase === 'verifying'
+                          ? `Checking deployment status (check ${addFeedback.verificationAttempts ?? 0}/${STATUS_VERIFY_ATTEMPTS})…`
+                          : 'Collecting new runtime log entries…'}
+                  </Typography>
+                </Stack>
+              )}
               {addFeedback.phase === 'success' && <Alert severity="success">The application is Active and the deployment was confirmed.</Alert>}
               {addFeedback.phase === 'faulty' && <Alert severity="error">The MI reported the application in faulty state. The deployment failed.</Alert>}
               {addFeedback.phase === 'pending' && <Alert severity="warning">The file was accepted, but the deployment could not be confirmed within the expected time.</Alert>}
               {addFeedback.phase === 'error' && <Alert severity="error">{addFeedback.errorMessage || 'The Carbon Application could not be added.'}</Alert>}
-              {addFeedback.httpStatus !== undefined && <Typography variant="body2"><strong>HTTP status:</strong> {addFeedback.httpStatus}</Typography>}
-              {addFeedback.responseMessage && <Typography variant="body2"><strong>MI response:</strong> {addFeedback.responseMessage}</Typography>}
-              {addFeedback.rawResponse && <Box component="pre" sx={{ m: 0, p: 1.5, maxHeight: 140, overflow: 'auto', borderRadius: 1, bgcolor: 'action.hover', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{addFeedback.rawResponse}</Box>}
-              {addFeedback.logLines && addFeedback.logLines.length > 0 && <Box>
-                <Typography variant="body2" sx={{ mb: 0.5, fontWeight: 600 }}>New runtime log evidence</Typography>
-                <Box component="pre" sx={{ m: 0, p: 1.5, maxHeight: 160, overflow: 'auto', borderRadius: 1, bgcolor: 'action.hover', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{addFeedback.logLines.join('\n')}</Box>
-              </Box>}
-              {(addFeedback.phase === 'success' || addFeedback.phase === 'faulty') && addFeedback.logLines?.length === 0 && <Typography variant="body2" color="text.secondary">No new related entry was found in `wso2carbon.log`; the deployment result comes from the applications query.</Typography>}
-              {addFeedback.logError && <Typography variant="body2" color="text.secondary">Log evidence unavailable: {addFeedback.logError}</Typography>}
+              {addFeedback.httpStatus !== undefined && (
+                <Typography variant="body2">
+                  <strong>HTTP status:</strong> {addFeedback.httpStatus}
+                </Typography>
+              )}
+              {addFeedback.responseMessage && (
+                <Typography variant="body2">
+                  <strong>MI response:</strong> {addFeedback.responseMessage}
+                </Typography>
+              )}
+              {addFeedback.rawResponse && (
+                <Box component="pre" sx={{ m: 0, p: 1.5, maxHeight: 140, overflow: 'auto', borderRadius: 1, bgcolor: 'action.hover', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                  {addFeedback.rawResponse}
+                </Box>
+              )}
+              {addFeedback.logLines && addFeedback.logLines.length > 0 && (
+                <Box>
+                  <Typography variant="body2" sx={{ mb: 0.5, fontWeight: 600 }}>
+                    New runtime log evidence
+                  </Typography>
+                  <Box component="pre" sx={{ m: 0, p: 1.5, maxHeight: 160, overflow: 'auto', borderRadius: 1, bgcolor: 'action.hover', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                    {addFeedback.logLines.join('\n')}
+                  </Box>
+                </Box>
+              )}
+              {(addFeedback.phase === 'success' || addFeedback.phase === 'faulty') && addFeedback.logLines?.length === 0 && (
+                <Typography variant="body2" color="text.secondary">
+                  No new related entry was found in `wso2carbon.log`; the deployment result comes from the applications query.
+                </Typography>
+              )}
+              {addFeedback.logError && (
+                <Typography variant="body2" color="text.secondary">
+                  Log evidence unavailable: {addFeedback.logError}
+                </Typography>
+              )}
             </Stack>
           )}
         </DialogContent>
         <DialogActions>
-          {!addFeedback || addFeedback.phase === 'confirm' ? <>
-            <Button onClick={closeAddDialog} disabled={busy}>Cancel</Button>
-            <Button variant="contained" startIcon={<Upload size={15} />} onClick={() => void confirmAddApplication()} disabled={busy}>Add .car</Button>
-          </> : addFeedback.phase === 'pending' || (addFeedback.phase === 'error' && addFeedback.retryableVerification) ? <>
-            <Button onClick={closeAddDialog} disabled={busy}>Close</Button>
-            <Button variant="contained" onClick={() => void verifyAddStatus()} disabled={busy}>{busy ? 'Checking…' : 'Check status'}</Button>
-          </> : addFeedback.phase === 'success' || addFeedback.phase === 'faulty' || addFeedback.phase === 'error' ? <Button variant="contained" onClick={closeAddDialog}>Close</Button> : null}
+          {!addFeedback || addFeedback.phase === 'confirm' ? (
+            <>
+              <Button onClick={closeAddDialog} disabled={busy}>
+                Cancel
+              </Button>
+              <Button variant="contained" startIcon={<Upload size={15} />} onClick={() => void confirmAddApplication()} disabled={busy}>
+                Add .car
+              </Button>
+            </>
+          ) : addFeedback.phase === 'pending' || (addFeedback.phase === 'error' && addFeedback.retryableVerification) ? (
+            <>
+              <Button onClick={closeAddDialog} disabled={busy}>
+                Close
+              </Button>
+              <Button variant="contained" onClick={() => void verifyAddStatus()} disabled={busy}>
+                {busy ? 'Checking…' : 'Check status'}
+              </Button>
+            </>
+          ) : addFeedback.phase === 'success' || addFeedback.phase === 'faulty' || addFeedback.phase === 'error' ? (
+            <Button variant="contained" onClick={closeAddDialog}>
+              Close
+            </Button>
+          ) : null}
         </DialogActions>
       </Dialog>
       <Dialog open={applicationToDelete !== null} onClose={() => !busy && setApplicationToDelete(null)} maxWidth="sm" fullWidth>
@@ -778,7 +998,11 @@ function CarbonApplicationsPanel({ envId, projectId, componentId, onSelectArtifa
           {deleteFeedback?.phase === 'success' ? 'Carbon Application removed' : deleteFeedback?.phase === 'pending' ? 'Removal not yet confirmed' : deleteFeedback?.phase === 'error' ? 'Carbon Application removal failed' : 'Delete Carbon Application'}
         </DialogTitle>
         <DialogContent>
-          {applicationToDelete && <Typography variant="body2" color="text.secondary" sx={{ mb: 2, wordBreak: 'break-word' }}>{carbonApplicationFileName(applicationToDelete)}</Typography>}
+          {applicationToDelete && (
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2, wordBreak: 'break-word' }}>
+              {carbonApplicationFileName(applicationToDelete)}
+            </Typography>
+          )}
           {!deleteFeedback || deleteFeedback.phase === 'confirm' ? (
             <Typography>Are you sure you want to delete this Carbon Application?</Typography>
           ) : (
@@ -787,35 +1011,79 @@ function CarbonApplicationsPanel({ envId, projectId, componentId, onSelectArtifa
                 <Stack direction="row" alignItems="center" gap={1}>
                   <CircularProgress size={20} />
                   <Typography>
-                    {deleteFeedback.phase === 'deleting' ? 'Sending delete command to the MI runtime…' : deleteFeedback.phase === 'verifying' ? `Verifying removal (check ${deleteFeedback.verificationAttempts ?? 0}/${STATUS_VERIFY_ATTEMPTS})…` : 'Collecting related runtime log entries…'}
+                    {deleteFeedback.phase === 'deleting'
+                      ? 'Sending delete command to the MI runtime…'
+                      : deleteFeedback.phase === 'verifying'
+                        ? `Verifying removal (check ${deleteFeedback.verificationAttempts ?? 0}/${STATUS_VERIFY_ATTEMPTS})…`
+                        : 'Collecting related runtime log entries…'}
                   </Typography>
                 </Stack>
               )}
               {deleteFeedback.phase === 'success' && <Alert severity="success">The application is no longer present in the active or faulty application lists.</Alert>}
               {deleteFeedback.phase === 'pending' && <Alert severity="warning">The MI accepted the command, but removal has not been confirmed yet. You can check the runtime status again.</Alert>}
               {deleteFeedback.phase === 'error' && <Alert severity="error">{deleteFeedback.errorMessage || 'The Carbon Application could not be removed.'}</Alert>}
-              {deleteFeedback.httpStatus !== undefined && <Typography variant="body2"><strong>HTTP status:</strong> {deleteFeedback.httpStatus}</Typography>}
-              {deleteFeedback.responseMessage && <Typography variant="body2"><strong>MI response:</strong> {deleteFeedback.responseMessage}</Typography>}
-              {deleteFeedback.rawResponse && <Box component="pre" sx={{ m: 0, p: 1.5, maxHeight: 140, overflow: 'auto', borderRadius: 1, bgcolor: 'action.hover', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{deleteFeedback.rawResponse}</Box>}
-              {deleteFeedback.logLines && deleteFeedback.logLines.length > 0 && (
-                <Box>
-                  <Typography variant="body2" sx={{ mb: 0.5, fontWeight: 600 }}>Runtime log evidence</Typography>
-                  <Box component="pre" sx={{ m: 0, p: 1.5, maxHeight: 160, overflow: 'auto', borderRadius: 1, bgcolor: 'action.hover', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{deleteFeedback.logLines.join('\n')}</Box>
+              {deleteFeedback.httpStatus !== undefined && (
+                <Typography variant="body2">
+                  <strong>HTTP status:</strong> {deleteFeedback.httpStatus}
+                </Typography>
+              )}
+              {deleteFeedback.responseMessage && (
+                <Typography variant="body2">
+                  <strong>MI response:</strong> {deleteFeedback.responseMessage}
+                </Typography>
+              )}
+              {deleteFeedback.rawResponse && (
+                <Box component="pre" sx={{ m: 0, p: 1.5, maxHeight: 140, overflow: 'auto', borderRadius: 1, bgcolor: 'action.hover', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                  {deleteFeedback.rawResponse}
                 </Box>
               )}
-              {deleteFeedback.phase === 'success' && deleteFeedback.logLines?.length === 0 && <Typography variant="body2" color="text.secondary">The removal was confirmed by the applications query, but no related entry was found in `wso2carbon.log`.</Typography>}
-              {deleteFeedback.logError && <Typography variant="body2" color="text.secondary">Log evidence unavailable: {deleteFeedback.logError}</Typography>}
+              {deleteFeedback.logLines && deleteFeedback.logLines.length > 0 && (
+                <Box>
+                  <Typography variant="body2" sx={{ mb: 0.5, fontWeight: 600 }}>
+                    Runtime log evidence
+                  </Typography>
+                  <Box component="pre" sx={{ m: 0, p: 1.5, maxHeight: 160, overflow: 'auto', borderRadius: 1, bgcolor: 'action.hover', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                    {deleteFeedback.logLines.join('\n')}
+                  </Box>
+                </Box>
+              )}
+              {deleteFeedback.phase === 'success' && deleteFeedback.logLines?.length === 0 && (
+                <Typography variant="body2" color="text.secondary">
+                  The removal was confirmed by the applications query, but no related entry was found in `wso2carbon.log`.
+                </Typography>
+              )}
+              {deleteFeedback.logError && (
+                <Typography variant="body2" color="text.secondary">
+                  Log evidence unavailable: {deleteFeedback.logError}
+                </Typography>
+              )}
             </Stack>
           )}
         </DialogContent>
         <DialogActions>
-          {!deleteFeedback || deleteFeedback.phase === 'confirm' ? <>
-            <Button onClick={() => setApplicationToDelete(null)} disabled={busy}>Cancel</Button>
-            <Button color="error" variant="contained" startIcon={<Trash2 size={15} />} onClick={() => void confirmDeleteApplication()} disabled={busy}>Delete</Button>
-          </> : deleteFeedback.phase === 'pending' || deleteFeedback.phase === 'error' ? <>
-            <Button onClick={() => setApplicationToDelete(null)} disabled={busy}>Close</Button>
-            <Button variant="contained" onClick={() => void verifyDeleteStatus()} disabled={busy}>{busy ? 'Checking…' : 'Check status'}</Button>
-          </> : deleteFeedback.phase === 'success' ? <Button variant="contained" onClick={() => setApplicationToDelete(null)}>Close</Button> : null}
+          {!deleteFeedback || deleteFeedback.phase === 'confirm' ? (
+            <>
+              <Button onClick={() => setApplicationToDelete(null)} disabled={busy}>
+                Cancel
+              </Button>
+              <Button color="error" variant="contained" startIcon={<Trash2 size={15} />} onClick={() => void confirmDeleteApplication()} disabled={busy}>
+                Delete
+              </Button>
+            </>
+          ) : deleteFeedback.phase === 'pending' || deleteFeedback.phase === 'error' ? (
+            <>
+              <Button onClick={() => setApplicationToDelete(null)} disabled={busy}>
+                Close
+              </Button>
+              <Button variant="contained" onClick={() => void verifyDeleteStatus()} disabled={busy}>
+                {busy ? 'Checking…' : 'Check status'}
+              </Button>
+            </>
+          ) : deleteFeedback.phase === 'success' ? (
+            <Button variant="contained" onClick={() => setApplicationToDelete(null)}>
+              Close
+            </Button>
+          ) : null}
         </DialogActions>
       </Dialog>
     </Stack>
@@ -831,15 +1099,8 @@ export function ArtifactTypeSelector({ envId, projectId, componentId, onSelectAr
 
   // Keep Carbon Applications available even when the heartbeat has not yet persisted an app;
   // the live Management API is the source of truth for this panel and still supports Add.
-  const baseTypes = allTypes.some((t) => t.artifactType === 'CompositeApp')
-    ? allTypes.filter((t) => !ENTRY_POINT_TYPE_SET.has(t.artifactType))
-    : [...allTypes.filter((t) => !ENTRY_POINT_TYPE_SET.has(t.artifactType)), { artifactType: 'CompositeApp' }];
+  const baseTypes = allTypes.some((t) => t.artifactType === 'CompositeApp') ? allTypes.filter((t) => !ENTRY_POINT_TYPE_SET.has(t.artifactType)) : [...allTypes.filter((t) => !ENTRY_POINT_TYPE_SET.has(t.artifactType)), { artifactType: 'CompositeApp' }];
   const types = [...baseTypes.filter((t) => t.artifactType !== 'Server'), { artifactType: 'Server' }];
-  const registryIndex = types.findIndex((t) => t.artifactType === 'RegistryResource');
-  if (registryIndex >= 0) {
-    const server = types.pop();
-    if (server) types.splice(registryIndex + 1, 0, server);
-  }
   const selectedArtifactType = selectedType ?? types[0]?.artifactType ?? '';
   const isSearching = query.length > 0;
   // When searching, fetch all items (no limit/offset) so client-side filter works across all pages.
@@ -888,7 +1149,11 @@ export function ArtifactTypeSelector({ envId, projectId, componentId, onSelectAr
           fullWidth
           sx={{ mb: 2 }}
         />
-        {selectedArtifactType === 'Server' ? <ServerManagementPanel envId={envId} projectId={projectId} componentId={componentId} /> : selectedArtifactType === 'CompositeApp' ? <CarbonApplicationsPanel envId={envId} projectId={projectId} componentId={componentId} onSelectArtifact={onSelectArtifact} /> : loadingArtifacts ? (
+        {selectedArtifactType === 'Server' ? (
+          <ServerManagementPanel envId={envId} projectId={projectId} componentId={componentId} />
+        ) : selectedArtifactType === 'CompositeApp' ? (
+          <CarbonApplicationsPanel envId={envId} projectId={projectId} componentId={componentId} onSelectArtifact={onSelectArtifact} />
+        ) : loadingArtifacts ? (
           <CircularProgress size={24} sx={{ display: 'block', mx: 'auto', py: 4 }} />
         ) : (
           <SelectedTypeArtifacts
@@ -913,7 +1178,18 @@ export function ArtifactTypeSelector({ envId, projectId, componentId, onSelectAr
   );
 }
 
-const drawerSx = { '& .MuiDrawer-paper': { width: '60%', maxWidth: 700, minWidth: 400, position: 'fixed', top: 64, height: 'calc(100% - 64px)', borderLeft: '1px solid', borderColor: 'divider' } };
+const drawerSx = (isRegistry: boolean, maximized: boolean, sidebarWidth: number) => ({
+  '& .MuiDrawer-paper': {
+    width: isRegistry ? (maximized ? `calc(100vw - ${sidebarWidth}px)` : { xs: '100vw', md: '72vw' }) : '60%',
+    maxWidth: isRegistry ? (maximized ? 'none' : 1200) : 700,
+    minWidth: isRegistry ? { xs: 0, md: 760 } : 400,
+    position: 'fixed',
+    top: 64,
+    height: 'calc(100% - 64px)',
+    borderLeft: '1px solid',
+    borderColor: 'divider',
+  },
+});
 const headerSx = { px: 2, py: 1.5, borderBottom: '1px solid', borderColor: 'divider' };
 const COMPOSITE_APP_FAULT_STACKTRACE_QUERY = `
   query GetCompositeAppFaultStackTrace($runtimeId: String!, $appName: String!) {
@@ -932,12 +1208,15 @@ const DATA_SERVICE_FAULT_STACKTRACE_QUERY = `
 
 export function ArtifactDetail({ selected, onClose }: { selected: SelectedArtifact | null; onClose: () => void }) {
   const [activeTabIndex, setActiveTabIndex] = useState(0);
+  const [drawerMaximized, setDrawerMaximized] = useState(false);
+  const [registryDirty, setRegistryDirty] = useState(false);
   const [stacktraceExpanded, setStacktraceExpanded] = useState(false);
   const [stacktraceLoading, setStacktraceLoading] = useState(false);
   const [stacktrace, setStacktrace] = useState<string | null>(null);
   const [stacktraceError, setStacktraceError] = useState<string | null>(null);
   const [stacktraceLoadedFor, setStacktraceLoadedFor] = useState<string | null>(null);
   const stacktraceRequestRef = useRef<string | null>(null);
+  const { sidebarWidth } = useLayout();
   const artifactKey = selected ? `${selected.artifactType}-${selected.artifact.name}` : '';
   useEffect(() => {
     if (selected?.initialTab) {
@@ -954,11 +1233,14 @@ export function ArtifactDetail({ selected, onClose }: { selected: SelectedArtifa
     setStacktraceError(null);
     setStacktraceLoadedFor(null);
     stacktraceRequestRef.current = null;
+    setDrawerMaximized(false);
+    setRegistryDirty(false);
   }, [artifactKey, selected?.artifactType, selected?.initialTab]);
 
   if (!selected) return null;
 
   const { artifact, artifactType, envId, componentId } = selected;
+  const isRegistryArtifact = artifactType === 'RegistryResource';
   // A faulty data service failed to deploy, so it has no live artifact on the runtime.
   // The Overview and Source tabs would trigger management API calls that return 404,
   // so only expose the Runtimes tab (backed by stored heartbeat data) in that case.
@@ -1008,13 +1290,16 @@ export function ArtifactDetail({ selected, onClose }: { selected: SelectedArtifa
             </Stack>
           );
         }
-        return <RegistryBrowser
-          runtimeId={runtimeId}
-          componentId={componentId}
-          environmentId={envId}
-          projectId={selected.projectId}
-          runtimes={(artifact.runtimes as Array<{ runtimeId: string; runtimeName?: string; status?: string }> | undefined) ?? []}
-        />;
+        return (
+          <RegistryBrowser
+            runtimeId={runtimeId}
+            componentId={componentId}
+            environmentId={envId}
+            projectId={selected.projectId}
+            runtimes={(artifact.runtimes as Array<{ runtimeId: string; runtimeName?: string; status?: string }> | undefined) ?? []}
+            onDirtyChange={setRegistryDirty}
+          />
+        );
       }
       default:
         return null;
@@ -1089,16 +1374,30 @@ export function ArtifactDetail({ selected, onClose }: { selected: SelectedArtifa
   };
 
   return (
-    <Drawer anchor="right" open onClose={onClose} variant="persistent" sx={drawerSx}>
+    <Drawer
+      anchor="right"
+      open
+      onClose={() => {
+        if (isRegistryArtifact && registryDirty && !window.confirm('Discard unsaved resource changes?')) return;
+        onClose();
+      }}
+      variant="persistent"
+      sx={drawerSx(isRegistryArtifact, drawerMaximized, sidebarWidth)}>
       <Stack direction="row" alignItems="center" justifyContent="space-between" sx={headerSx}>
         <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
           {displayName}
         </Typography>
         <Stack direction="row" gap={0.5}>
-          <IconButton size="small" aria-label="maximize" disabled>
+          <IconButton size="small" aria-label={drawerMaximized ? 'restore' : 'maximize'} onClick={() => isRegistryArtifact && setDrawerMaximized((value) => !value)} disabled={!isRegistryArtifact}>
             <Maximize2 size={16} />
           </IconButton>
-          <IconButton size="small" aria-label="close" onClick={onClose}>
+          <IconButton
+            size="small"
+            aria-label="close"
+            onClick={() => {
+              if (isRegistryArtifact && registryDirty && !window.confirm('Discard unsaved resource changes?')) return;
+              onClose();
+            }}>
             <X size={16} />
           </IconButton>
         </Stack>

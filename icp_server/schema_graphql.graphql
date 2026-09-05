@@ -182,6 +182,7 @@ type Query {
   getMIUsers(componentId: String!, runtimeId: String!, pagination: PaginationInput): MIUsersPage!
   # Registry Resource Browser Queries
   registryDirectory(runtimeId: String!, path: String!, expand: Boolean): RegistryDirectoryResponse!
+  registryResourceSearch(runtimeId: String!, path: String!, searchKey: String!): RegistrySearchResponse!
   registryFileContent(runtimeId: String!, path: String!): String!
   registryResourceMetadata(runtimeId: String!, path: String!): RegistryResourceMetadata!
   registryResourceProperties(runtimeId: String!, path: String!): RegistryPropertiesResponse!
@@ -195,7 +196,7 @@ type Mutation {
   deleteRuntime(runtimeId: String!, revokeSecret: Boolean): DeleteRuntimeResult!
 
   # Environment Mutations
-  createEnvironment(environment: EnvironmentInput!): Environment
+  createEnvironment(environment: EnvironmentCreateInput!): Environment
   deleteEnvironment(environmentId: String!): Boolean!
   updateEnvironment(
     environmentId: String!
@@ -214,7 +215,7 @@ type Mutation {
   updateProject(project: ProjectUpdateInput!): Project
 
   # Component Mutations
-  createComponent(component: ComponentInput!): Component
+  createComponent(component: ComponentCreateInput!): Component
   deleteComponent(componentId: String!): Boolean!
   deleteComponentV2(
     orgHandler: String!
@@ -829,6 +830,18 @@ type RegistryPropertiesResponse {
   properties: [RegistryProperty!]!
 }
 
+type RegistrySearchItem {
+  name: String!
+  path: String!
+  mediaType: String!
+  isDirectory: Boolean!
+}
+
+type RegistrySearchResponse {
+  count: Int!
+  items: [RegistrySearchItem!]!
+}
+
 # ============================================
 # Parameter Type - Generic Key-Value Parameter
 # ============================================
@@ -1335,8 +1348,8 @@ type Secret {
 # Input Types for Mutations
 # ============================================
 
-# Environment Input
-input EnvironmentInput {
+# Environment Create Input
+input EnvironmentCreateInput {
   name: String!
   environmentHandler: String!
   description: String
@@ -1363,8 +1376,8 @@ input ProjectInput {
   secretRef: String
 }
 
-# Component Input
-input ComponentInput {
+# Component Create Input
+input ComponentCreateInput {
   # Required Fields
   projectId: String!
   name: String!
