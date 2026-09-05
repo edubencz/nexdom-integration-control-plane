@@ -69,7 +69,6 @@ import { useQueryClient } from '@tanstack/react-query';
 import { RegistryBrowser } from './RegistryBrowser';
 import { authenticatedFetch } from '../auth/tokenManager';
 import { miApplicationsApiUrl } from '../config/api';
-import { ServerManagementPanel } from './ServerManagementPanel';
 
 /**
  * Normalizes state/tracing/statistics values to a boolean.
@@ -475,8 +474,9 @@ function carbonApplicationFileName(app: CarbonApplication): string {
   return app.version ? `${applicationName}-${app.version}` : applicationName;
 }
 
-function CarbonApplicationsPanel({ envId, projectId, componentId, onSelectArtifact }: { envId: string; projectId: string; componentId: string; onSelectArtifact: (a: GqlArtifact, type: string, envId: string) => void }) {
-  const { data: runtimes = [] } = useRuntimes(envId, projectId, componentId);
+export function CarbonApplicationsPanel({ envId, projectId, componentId, runtimes: controlledRuntimes, selectedRuntimeId, canEdit = true, onSelectArtifact }: { envId: string; projectId: string; componentId: string; runtimes?: Array<{ runtimeId: string; runtimeName?: string; runtimeType: string; status: string }>; selectedRuntimeId?: string; canEdit?: boolean; onSelectArtifact?: (a: GqlArtifact, type: string, envId: string) => void }) {
+  const { data: fetchedRuntimes = [] } = useRuntimes(envId, projectId, componentId, !controlledRuntimes);
+  const runtimes = controlledRuntimes ?? fetchedRuntimes;
   const miRuntimes = runtimes.filter((r) => r.runtimeType === 'MI' && r.status === 'RUNNING');
   const [runtimeId, setRuntimeId] = useState('');
   const [applications, setApplications] = useState<CarbonApplication[]>([]);
@@ -489,10 +489,19 @@ function CarbonApplicationsPanel({ envId, projectId, componentId, onSelectArtifa
   const [deleteFeedback, setDeleteFeedback] = useState<DeleteFeedback | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const addOperationRef = useRef<AddOperation | null>(null);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    // React StrictMode runs effect cleanup and setup once during development.
+    // Reset the flag in setup so the second (live) effect instance can run
+    // post-upload/delete verification instead of returning immediately.
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   useEffect(() => {
+    if (selectedRuntimeId) { setRuntimeId(selectedRuntimeId); return; }
     if (!miRuntimes.some((r) => r.runtimeId === runtimeId)) setRuntimeId(miRuntimes[0]?.runtimeId ?? '');
-  }, [miRuntimes, runtimeId]);
+  }, [miRuntimes, runtimeId, selectedRuntimeId]);
 
   const fetchApplications = useCallback(async (): Promise<CarbonApplication[]> => {
     if (!runtimeId) return [];
@@ -526,6 +535,7 @@ function CarbonApplicationsPanel({ envId, projectId, componentId, onSelectArtifa
 
     setAddFeedback((previous) => previous ? { ...previous, ...responseDetails, phase: 'verifying', verificationAttempts: 0 } : previous);
     for (let attempt = 1; attempt <= STATUS_VERIFY_ATTEMPTS; attempt += 1) {
+      if (!mountedRef.current) return;
       try {
         const currentApplications = await fetchApplications();
         const matchingApplication = currentApplications.find((app) => carbonApplicationMatchesFile(app, operation.fileName));
@@ -553,6 +563,7 @@ function CarbonApplicationsPanel({ envId, projectId, componentId, onSelectArtifa
       }
       setAddFeedback((previous) => previous ? { ...previous, phase: 'verifying', verificationAttempts: attempt } : previous);
       if (attempt < STATUS_VERIFY_ATTEMPTS) await delay(STATUS_VERIFY_INTERVAL_MS);
+      if (!mountedRef.current) return;
     }
   }, [fetchApplications, runtimeId]);
 
@@ -648,6 +659,7 @@ function CarbonApplicationsPanel({ envId, projectId, componentId, onSelectArtifa
   const verifyDelete = useCallback(async (app: CarbonApplication, responseDetails?: Pick<DeleteFeedback, 'httpStatus' | 'responseMessage' | 'rawResponse'>) => {
     setDeleteFeedback({ phase: 'verifying', ...responseDetails, verificationAttempts: 0 });
     for (let attempt = 1; attempt <= STATUS_VERIFY_ATTEMPTS; attempt += 1) {
+      if (!mountedRef.current) return;
       try {
         const currentApplications = await fetchApplications();
         const stillPresent = currentApplications.some((candidate) => isSameCarbonApplication(candidate, app));
@@ -668,6 +680,7 @@ function CarbonApplicationsPanel({ envId, projectId, componentId, onSelectArtifa
       }
       setDeleteFeedback((previous) => previous ? { ...previous, phase: 'verifying', verificationAttempts: attempt } : previous);
       if (attempt < STATUS_VERIFY_ATTEMPTS) await delay(STATUS_VERIFY_INTERVAL_MS);
+      if (!mountedRef.current) return;
     }
     setDeleteFeedback((previous) => previous ? { ...previous, phase: 'pending' } : previous);
   }, [collectDeleteLogEvidence, fetchApplications]);
@@ -711,23 +724,23 @@ function CarbonApplicationsPanel({ envId, projectId, componentId, onSelectArtifa
   return (
     <Stack gap={2}>
       <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} alignItems={{ sm: 'center' }}>
-        <Stack direction="row" gap={1} alignItems="center" sx={{ flex: 1 }}>
+        {!selectedRuntimeId && <Stack direction="row" gap={1} alignItems="center" sx={{ flex: 1 }}>
           <Server size={16} />
           <Typography variant="body2" color="text.secondary">Runtime</Typography>
           <select value={runtimeId} onChange={(e) => setRuntimeId(e.target.value)} disabled={busy || fileToAdd !== null} style={{ minWidth: 220, padding: '7px 10px', borderRadius: 4, border: '1px solid var(--oxygen-palette-divider)', background: 'transparent', color: 'inherit' }}>
             {miRuntimes.map((r) => <option key={r.runtimeId} value={r.runtimeId}>{r.runtimeName || r.runtimeId}</option>)}
           </select>
-        </Stack>
+        </Stack>}
         <Button size="small" variant="outlined" startIcon={<RefreshCw size={15} />} onClick={() => void loadApplications()} disabled={loading || busy}>{loading ? 'Loading…' : 'Refresh'}</Button>
-        <Button size="small" variant="contained" startIcon={<Upload size={15} />} onClick={() => inputRef.current?.click()} disabled={busy}>Add .car</Button>
+        {canEdit && <Button size="small" variant="contained" startIcon={<Upload size={15} />} onClick={() => inputRef.current?.click()} disabled={busy}>Add .car</Button>}
         <input ref={inputRef} hidden type="file" accept=".car,application/octet-stream" onChange={(e) => { const file = e.target.files?.[0]; if (file) { setFileToAdd(file); setAddFeedback({ phase: 'confirm', fileName: file.name, fileSize: file.size, runtimeId }); } }} />
       </Stack>
       {error && <Alert severity="error">{error}</Alert>}
       {applications.length === 0 && !loading ? <Typography color="text.secondary" sx={{ py: 3, textAlign: 'center' }}>No Carbon Applications found.</Typography> : applications.map((app) => {
-        const artifact = { name: app.name, version: app.version, state: app.state === 'faulty' ? 'Faulty' : 'Active' } as GqlArtifact;
+        const artifact = { name: app.name, version: app.version, state: app.state === 'faulty' ? 'Faulty' : 'Active', runtimes: [{ runtimeId, runtimeName: miRuntimes.find((r) => r.runtimeId === runtimeId)?.runtimeName, status: 'RUNNING' }] } as GqlArtifact;
         return <Card key={`${app.name}-${app.version ?? ''}`} variant="outlined"><CardContent sx={{ display: 'flex', alignItems: 'center', gap: 2, py: 1.5, '&:last-child': { pb: 1.5 } }}>
-          <Box sx={{ flex: 1, cursor: 'pointer' }} onClick={() => onSelectArtifact(artifact, 'CompositeApp', envId)}><Typography variant="body2" sx={{ fontWeight: 600 }}>{app.name}</Typography><Typography variant="caption" color="text.secondary">Version {app.version || '—'} · {app.state === 'faulty' ? 'Faulty' : 'Active'}</Typography></Box>
-          <IconButton size="small" color="error" aria-label={`Delete ${app.name}`} onClick={() => void deleteApplication(app)} disabled={busy}><Trash2 size={16} /></IconButton>
+          <Box sx={{ flex: 1, cursor: onSelectArtifact ? 'pointer' : 'default' }} onClick={() => onSelectArtifact?.(artifact, 'CompositeApp', envId)}><Typography variant="body2" sx={{ fontWeight: 600 }}>{app.name}</Typography><Typography variant="caption" color="text.secondary">Version {app.version || '—'} · {app.state === 'faulty' ? 'Faulty' : 'Active'}</Typography></Box>
+          {canEdit && <IconButton size="small" color="error" aria-label={`Delete ${app.name}`} onClick={() => void deleteApplication(app)} disabled={busy}><Trash2 size={16} /></IconButton>}
         </CardContent></Card>;
       })}
       <Dialog open={fileToAdd !== null} onClose={closeAddDialog} maxWidth="sm" fullWidth>
@@ -822,7 +835,7 @@ function CarbonApplicationsPanel({ envId, projectId, componentId, onSelectArtifa
   );
 }
 
-export function ArtifactTypeSelector({ envId, projectId, componentId, onSelectArtifact }: { envId: string; projectId: string; componentId: string; onSelectArtifact: (a: GqlArtifact, type: string, envId: string) => void }) {
+export function ArtifactTypeSelector({ envId, projectId: _projectId, componentId, onSelectArtifact, onOpenMIOperations }: { envId: string; projectId: string; componentId: string; onSelectArtifact: (a: GqlArtifact, type: string, envId: string) => void; onOpenMIOperations?: (tab?: 'server' | 'applications' | 'registry') => void }) {
   const { data: allTypes = [], isLoading } = useArtifactTypes(componentId, envId);
   const [selectedType, setSelectedType] = useState<string | null>(null);
   const [query, setQuery] = useState('');
@@ -888,7 +901,7 @@ export function ArtifactTypeSelector({ envId, projectId, componentId, onSelectAr
           fullWidth
           sx={{ mb: 2 }}
         />
-        {selectedArtifactType === 'Server' ? <ServerManagementPanel envId={envId} projectId={projectId} componentId={componentId} /> : selectedArtifactType === 'CompositeApp' ? <CarbonApplicationsPanel envId={envId} projectId={projectId} componentId={componentId} onSelectArtifact={onSelectArtifact} /> : loadingArtifacts ? (
+        {selectedArtifactType === 'Server' || selectedArtifactType === 'CompositeApp' || selectedArtifactType === 'RegistryResource' ? <Stack gap={1.5}><Alert severity="info">Runtime administration is available in MI Operations.</Alert>{onOpenMIOperations && <Button variant="contained" onClick={() => onOpenMIOperations(selectedArtifactType === 'Server' ? 'server' : selectedArtifactType === 'CompositeApp' ? 'applications' : 'registry')}>Open MI Operations</Button>}</Stack> : loadingArtifacts ? (
           <CircularProgress size={24} sx={{ display: 'block', mx: 'auto', py: 4 }} />
         ) : (
           <SelectedTypeArtifacts

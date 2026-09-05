@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import { useAccessControl } from '../contexts/AccessControlContext';
 import { fetchProjectPermissions, fetchComponentPermissions } from '../api/auth';
@@ -6,46 +6,54 @@ import { fetchProjectPermissions, fetchComponentPermissions } from '../api/auth'
 export function useLoadProjectPermissions(orgHandle: string, projectId: string) {
   const { userId } = useAuth();
   const { setProjectPermissions, clearProjectPermissions } = useAccessControl();
-  const loadedRef = useRef<string>('');
+  const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
-    if (!projectId || !userId) return;
-
-    // If switching to a different project, clear previous permissions
-    if (loadedRef.current && loadedRef.current !== projectId) {
-      clearProjectPermissions();
+    if (!projectId || !userId) {
+      setLoaded(false);
+      return;
     }
+    setLoaded(false);
 
-    if (loadedRef.current === projectId) return;
-    loadedRef.current = projectId;
+    // Clear permissions before loading the new scope. Do not use a ref to skip
+    // this request: in React StrictMode an effect is mounted, cleaned up and
+    // mounted again. Marking the scope as loaded before the request resolves
+    // would cause the second mount to skip the only non-cancelled request.
+    clearProjectPermissions();
+    let cancelled = false;
 
     fetchProjectPermissions(orgHandle, userId, projectId)
-      .then((data) => setProjectPermissions(projectId, data.permissionNames))
-      .catch((err) => console.error('Failed to fetch project permissions', err));
+      .then((data) => { if (!cancelled) { setProjectPermissions(projectId, data.permissionNames); setLoaded(true); } })
+      .catch((err) => { if (!cancelled) { console.error('Failed to fetch project permissions', err); setLoaded(true); } });
+    return () => { cancelled = true; };
   }, [orgHandle, projectId, userId, setProjectPermissions, clearProjectPermissions]);
+  return loaded;
 }
 
 export function useLoadComponentPermissions(orgHandle: string, projectId: string, componentId: string) {
   const { userId } = useAuth();
   const { setComponentPermissions, clearComponentPermissions } = useAccessControl();
-  const loadedRef = useRef<string>('');
+  const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     // Early return if any required value is missing
-    if (!componentId || !projectId || !userId) return;
-
-    // If switching to a different component, clear previous permissions
-    if (loadedRef.current && loadedRef.current !== componentId) {
-      clearComponentPermissions();
+    if (!componentId || !projectId || !userId) {
+      setLoaded(false);
+      return;
     }
+    setLoaded(false);
 
-    // Skip if already loaded for this component
-    if (loadedRef.current === componentId) return;
-
-    loadedRef.current = componentId;
+    // Always start a request for the current scope. In React StrictMode the
+    // first effect instance is cancelled and immediately followed by a new
+    // one; a pre-populated "loaded" ref would make the second instance return
+    // without a request and leave callers waiting forever.
+    clearComponentPermissions();
+    let cancelled = false;
 
     fetchComponentPermissions(orgHandle, userId, projectId, componentId)
-      .then((data) => setComponentPermissions(componentId, data.permissionNames))
-      .catch((err) => console.error('Failed to fetch component permissions', err));
+      .then((data) => { if (!cancelled) { setComponentPermissions(componentId, data.permissionNames); setLoaded(true); } })
+      .catch((err) => { if (!cancelled) { console.error('Failed to fetch component permissions', err); setLoaded(true); } });
+    return () => { cancelled = true; };
   }, [orgHandle, projectId, componentId, userId, setComponentPermissions, clearComponentPermissions]);
+  return loaded;
 }

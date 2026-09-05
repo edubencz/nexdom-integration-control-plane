@@ -2712,6 +2712,7 @@ public type MIUsersResponse record {|
 public type MIUsersPage record {
     MIUser[] items;
     PageInfo pageInfo;
+    string userStoreStatus;
 };
 
 public type MIUserOperationResponse record {

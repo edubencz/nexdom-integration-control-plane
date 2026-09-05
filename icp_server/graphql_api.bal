@@ -663,15 +663,22 @@ isolated function validateRegistryResourceAccess(
     log:printDebug(string `Validating registry access for ${operation}`, userId = userContext.userId, runtimeId = runtimeId, path = path);
 
     string trimmedPath = path.trim();
-    if trimmedPath == "" {
-        log:printWarn(string `Empty path for ${operation}`, userId = userContext.userId, runtimeId = runtimeId);
-        return error("Invalid path");
+    boolean isRegistryRoot = operation == "registry directory" &&
+            (trimmedPath == "registry" || trimmedPath == "registry/config" || trimmedPath == "registry/governance");
+    if trimmedPath == "" || trimmedPath.includes("..") || trimmedPath.includes("\\") ||
+            (!isRegistryRoot && !(trimmedPath.startsWith("registry/config/") || trimmedPath.startsWith("registry/governance/"))) {
+        log:printWarn(string `Invalid registry path for ${operation}`, userId = userContext.userId, runtimeId = runtimeId, path = path);
+        return error("Path must point to a resource below registry/config or registry/governance");
     }
 
     types:Runtime? runtime = check storage:getRuntimeById(runtimeId);
     if runtime is () {
         log:printWarn(string `Runtime not found for ${operation}`, userId = userContext.userId, runtimeId = runtimeId);
         return error(string `Unable to retrieve ${operation}`);
+    }
+
+    if runtime.runtimeType != types:MI {
+        return error("Runtime is not a Micro Integrator runtime");
     }
 
     log:printDebug(string `Runtime found for ${operation}`,
@@ -4023,10 +4030,16 @@ service /graphql on graphqlListener {
         if runtime.component.id != componentId {
             return error("Runtime does not belong to the specified integration");
         }
+        if runtime.runtimeType != types:MI {
+            return error("Runtime is not a Micro Integrator runtime");
+        }
+        if runtime.status != types:RUNNING {
+            return error("Runtime is not online");
+        }
 
         types:AccessScope scope = auth:buildScopeFromContext(runtime.component.projectId, integrationId = componentId, envId = runtime.environment.id);
         if !check auth:hasAnyPermission(userContext.userId,
-                [auth:PERMISSION_INTEGRATION_EDIT, auth:PERMISSION_INTEGRATION_MANAGE], scope) {
+                [auth:PERMISSION_INTEGRATION_VIEW, auth:PERMISSION_INTEGRATION_EDIT, auth:PERMISSION_INTEGRATION_MANAGE], scope) {
             return error("Insufficient permissions to view MI users");
         }
 
@@ -4057,7 +4070,16 @@ service /graphql on graphqlListener {
                 json|error errField = errBody.Error;
                 if errField is string {
                     message = errField;
+                } else {
+                    json|error messageField = errBody.message;
+                    if messageField is string {
+                        message = messageField;
+                    }
                 }
+            }
+            string lowerMessage = message.toLowerAscii();
+            if lowerMessage.includes("file") && lowerMessage.includes("user store") {
+                return {items: [], pageInfo: {total: 0, 'limit: 0, offset: 0}, userStoreStatus: "UNSUPPORTED_FILE_BASED"};
             }
             return error(message);
         }
@@ -4109,7 +4131,7 @@ service /graphql on graphqlListener {
         }
 
         log:printDebug("Successfully fetched MI users from runtime", runtimeId = runtimeId, userCount = enrichedUsers.length());
-        return {items: enrichedUsers, pageInfo};
+        return {items: enrichedUsers, pageInfo, userStoreStatus: "SUPPORTED"};
     }
 
     isolated remote function addMIUser(graphql:Context context, string componentId, string runtimeId, string username, string password, boolean isAdmin = false, string domain = "primary") returns types:MIUserOperationResponse|error {
@@ -4121,6 +4143,12 @@ service /graphql on graphqlListener {
         }
         if runtime.component.id != componentId {
             return error("Runtime does not belong to the specified integration");
+        }
+        if runtime.runtimeType != types:MI {
+            return error("Runtime is not a Micro Integrator runtime");
+        }
+        if runtime.status != types:RUNNING {
+            return error("Runtime is not online");
         }
 
         types:AccessScope scope = auth:buildScopeFromContext(runtime.component.projectId, integrationId = componentId, envId = runtime.environment.id);
@@ -4193,6 +4221,12 @@ service /graphql on graphqlListener {
         if runtime.component.id != componentId {
             return error("Runtime does not belong to the specified integration");
         }
+        if runtime.runtimeType != types:MI {
+            return error("Runtime is not a Micro Integrator runtime");
+        }
+        if runtime.status != types:RUNNING {
+            return error("Runtime is not online");
+        }
 
         types:AccessScope scope = auth:buildScopeFromContext(runtime.component.projectId, integrationId = componentId, envId = runtime.environment.id);
         if !check auth:hasAnyPermission(userContext.userId,
@@ -4210,17 +4244,21 @@ service /graphql on graphqlListener {
         }
 
         string trimmedUsername = username.trim();
+        string normalizedDomain = domain.trim().length() == 0 ? "primary" : domain.trim();
         if trimmedUsername.length() == 0 {
             return error("username must be a non-empty string");
+        }
+        if trimmedUsername == "admin" && normalizedDomain == "primary" {
+            return error("Cannot delete the primary admin user");
         }
         string encodedUsername = check url:encode(trimmedUsername, "UTF-8");
 
         string bearerToken = check storage:issueRuntimeHmacToken(runtimeId);
-        log:printInfo("Deleting MI user on runtime management API", runtimeId = runtimeId, username = trimmedUsername, domain = domain);
+        log:printInfo("Deleting MI user on runtime management API", runtimeId = runtimeId, username = trimmedUsername, domain = normalizedDomain);
 
-        string deletePath = domain == "primary"
+        string deletePath = normalizedDomain == "primary"
             ? string `/management/users/${encodedUsername}`
-            : string `/management/users/${encodedUsername}?domain=${check url:encode(domain, "UTF-8")}`;
+            : string `/management/users/${encodedUsername}?domain=${check url:encode(normalizedDomain, "UTF-8")}`;
 
         http:Response|error deleteResponse = mgmtClient->delete(deletePath, (), {
             "Authorization": string `Bearer ${bearerToken}`

@@ -578,6 +578,7 @@ type EnvironmentsPage {
 type MIUsersPage {
   items: [MIUser!]!
   pageInfo: PageInfo!
+  userStoreStatus: String!
 }
 
 # ============================================

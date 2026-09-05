@@ -32,7 +32,8 @@ function registryPath(http:Request request) returns string|error {
     // The Management API uses registry/config/... and registry/governance/...
     // paths. Reject traversal before forwarding the decoded query value.
     if trimmed == "" || trimmed.includes("..") || trimmed.includes("\\") ||
-            !(trimmed.startsWith("registry/config/") || trimmed.startsWith("registry/governance/")) {
+            !(trimmed == "registry/config" || trimmed == "registry/governance" ||
+                trimmed.startsWith("registry/config/") || trimmed.startsWith("registry/governance/")) {
         return error("path must point to a resource below registry/config or registry/governance");
     }
     return trimmed;

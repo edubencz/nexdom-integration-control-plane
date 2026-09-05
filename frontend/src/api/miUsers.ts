@@ -7,10 +7,20 @@ export interface MiUser {
   isAdmin: boolean;
 }
 
+export type MiUserStoreStatus = 'SUPPORTED' | 'UNSUPPORTED_FILE_BASED';
+
+export interface MiUsersPage {
+  items: MiUser[];
+  pageInfo: { total: number; limit: number; offset: number };
+  userStoreStatus: MiUserStoreStatus;
+}
+
 const GET_MI_USERS = `
-  query GetMIUsers($componentId: String!, $runtimeId: String!) {
-    getMIUsers(componentId: $componentId, runtimeId: $runtimeId) {
-      users { username, domain, isAdmin }
+  query GetMIUsers($componentId: String!, $runtimeId: String!, $limit: Int, $offset: Int) {
+    getMIUsers(componentId: $componentId, runtimeId: $runtimeId, pagination: { limit: $limit, offset: $offset }) {
+      items { username, domain, isAdmin }
+      pageInfo { total, limit, offset }
+      userStoreStatus
     }
   }`;
 
@@ -28,12 +38,12 @@ const DELETE_MI_USER = `
     }
   }`;
 
-const miUsersKey = (componentId: string, runtimeId: string) => ['mi-users', componentId, runtimeId] as const;
+const miUsersKey = (componentId: string, runtimeId: string, limit: number, offset: number) => ['mi-users', componentId, runtimeId, limit, offset] as const;
 
-export function useListMiUsers(componentId: string, runtimeId: string, enabled = true) {
+export function useListMiUsers(componentId: string, runtimeId: string, limit = 25, offset = 0, enabled = true) {
   return useQuery({
-    queryKey: miUsersKey(componentId, runtimeId),
-    queryFn: () => gql<{ getMIUsers: { users: MiUser[] } }>(GET_MI_USERS, { componentId, runtimeId }).then((d) => d.getMIUsers.users),
+    queryKey: miUsersKey(componentId, runtimeId, limit, offset),
+    queryFn: () => gql<{ getMIUsers: MiUsersPage }>(GET_MI_USERS, { componentId, runtimeId, limit, offset }).then((d) => d.getMIUsers),
     enabled: enabled && !!componentId && !!runtimeId,
   });
 }
@@ -43,7 +53,7 @@ export function useCreateMiUser() {
   return useMutation({
     mutationFn: ({ componentId, runtimeId, username, password, isAdmin, domain }: { componentId: string; runtimeId: string; username: string; password: string; isAdmin: boolean; domain: string }) =>
       gql<{ addMIUser: { username: string; status: string } }>(ADD_MI_USER, { componentId, runtimeId, username, password, isAdmin, domain }).then((d) => d.addMIUser),
-    onSuccess: (_, vars) => qc.invalidateQueries({ queryKey: miUsersKey(vars.componentId, vars.runtimeId) }),
+    onSuccess: (_, vars) => qc.invalidateQueries({ queryKey: ['mi-users', vars.componentId, vars.runtimeId] }),
   });
 }
 
@@ -52,6 +62,6 @@ export function useDeleteMiUser() {
   return useMutation({
     mutationFn: ({ componentId, runtimeId, username, domain }: { componentId: string; runtimeId: string; username: string; domain: string }) =>
       gql<{ deleteMIUser: { username: string; status: string } }>(DELETE_MI_USER, { componentId, runtimeId, username, domain }).then((d) => d.deleteMIUser),
-    onSuccess: (_, vars) => qc.invalidateQueries({ queryKey: miUsersKey(vars.componentId, vars.runtimeId) }),
+    onSuccess: (_, vars) => qc.invalidateQueries({ queryKey: ['mi-users', vars.componentId, vars.runtimeId] }),
   });
 }

@@ -773,6 +773,8 @@ export default function Environment({
   onSelectArtifact: (a: GqlArtifact, type: string, envId: string) => void;
   onOpenDrawerForTab: (a: GqlArtifact, type: string, envId: string, tab: string) => void;
 }) {
+  const scope = useScope();
+  const navigate = useNavigate();
   const refreshEnvironmentArtifacts = useRefreshEnvironmentArtifacts();
   const queryClient = useQueryClient();
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -780,7 +782,8 @@ export default function Environment({
   const [settingsPanelOpen, setSettingsPanelOpen] = useState(false);
   const [currentEntryPoint, setCurrentEntryPoint] = useState<{ artifact: GqlArtifact; type: string } | null>(null);
 
-  // MI users state
+  // Legacy runtime-user state is retained for backwards-compatible drawer markup,
+  // but the user-store surface is no longer exposed from this screen.
   const [selectedRuntimeId, setSelectedRuntimeId] = useState('');
   const [createUserDialogOpen, setCreateUserDialogOpen] = useState(false);
   const [deleteUserTarget, setDeleteUserTarget] = useState<{ username: string; domain: string } | null>(null);
@@ -796,9 +799,9 @@ export default function Environment({
   const activeRuntimeId = validatedRuntimeId || (runtimes.length === 1 ? runtimes[0].runtimeId : '');
   const createMiUser = useCreateMiUser();
   const deleteMiUser = useDeleteMiUser();
-  const { data: miUsers = [], error: miUsersError, isLoading: miUsersLoading } = useListMiUsers(componentId, activeRuntimeId, componentType === 'MI' && settingsPanelOpen && !!activeRuntimeId);
-
-  const FILE_BASED_USER_STORE_ERROR = 'User management is not supported with the file-based user store. Please plug in a user store for the correct functionality';
+  const { data: miUsersPage, error: miUsersError, isLoading: miUsersLoading } = useListMiUsers(componentId, activeRuntimeId, 25, 0, false);
+  const miUsers = miUsersPage?.items ?? [];
+  const userStoreUnsupported = miUsersPage?.userStoreStatus === 'UNSUPPORTED_FILE_BASED';
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
@@ -812,16 +815,14 @@ export default function Environment({
 
   const closeCreateUserDialog = () => {
     setCreateUserDialogOpen(false);
-    setNewUserId('');
-    setNewPassword('');
-    setNewDomain('primary');
-    setNewIsAdmin(false);
-    setCreateUserError(null);
+    setNewUserId(''); setNewPassword(''); setNewDomain('primary'); setNewIsAdmin(false); setCreateUserError(null);
   };
 
   const onlineCount = runtimes.filter((r) => r.status === 'RUNNING').length;
   const totalCount = runtimes.length;
   const isOnline = onlineCount > 0;
+  const legacyRuntimeUsersEnabled = componentType === '__legacy_runtime_users__';
+  const openMIOperations = (tab: 'server' | 'applications' | 'registry' = 'server') => navigate(`${resourceUrl(scope, 'mi-operations')}?environmentId=${encodeURIComponent(env.id)}&tab=${tab}`);
   const showSourceButton = currentEntryPoint ? ['RestApi', 'ProxyService', 'InboundEndpoint', 'Task'].includes(currentEntryPoint.type) : false;
 
   return (
@@ -883,14 +884,14 @@ export default function Environment({
           </Stack>
 
           {/* MI Users section */}
-          {componentType === 'MI' && (
+          {legacyRuntimeUsersEnabled && (
             <>
               <Divider sx={{ my: 3 }} />
               <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1 }}>
                 <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
                   Runtime Users
                 </Typography>
-                <Tooltip title={miUsersError?.message === FILE_BASED_USER_STORE_ERROR ? 'User store not configured' : 'Add user'}>
+                <Tooltip title={userStoreUnsupported ? 'User store not configured' : 'Add user'}>
                   <span>
                     <IconButton
                       size="small"
@@ -902,7 +903,7 @@ export default function Environment({
                         setCreateUserError(null);
                         setCreateUserDialogOpen(true);
                       }}
-                      disabled={!activeRuntimeId || miUsersError?.message === FILE_BASED_USER_STORE_ERROR}
+                      disabled={!activeRuntimeId || userStoreUnsupported}
                       aria-label="Add user">
                       <UserPlus size={16} />
                     </IconButton>
@@ -924,7 +925,7 @@ export default function Environment({
 
               {runtimesError && (
                 <Typography variant="body2" color="error">
-                  Failed to load runtimes: {runtimesError.message}
+                  Failed to load runtimes: {runtimesError?.message}
                 </Typography>
               )}
 
@@ -938,7 +939,7 @@ export default function Environment({
 
               {activeRuntimeId && !miUsersLoading && miUsersError && (
                 <>
-                  {miUsersError.message === FILE_BASED_USER_STORE_ERROR ? (
+                  {userStoreUnsupported ? (
                     <Stack gap={1}>
                       <Typography variant="body2" color="text.secondary">
                         Your MI runtime does not have a user store configured. Users will appear here once configured.
@@ -953,7 +954,7 @@ export default function Environment({
                     </Stack>
                   ) : (
                     <Typography variant="body2" color="error">
-                      Failed to load users: {miUsersError.message}
+                      Failed to load users: {miUsersError?.message}
                     </Typography>
                   )}
                 </>
@@ -1004,7 +1005,7 @@ export default function Environment({
         </Drawer>
 
         {/* Create MI User dialog */}
-        <Dialog open={createUserDialogOpen} onClose={closeCreateUserDialog} maxWidth="xs" fullWidth>
+        {legacyRuntimeUsersEnabled && <Dialog open={createUserDialogOpen} onClose={closeCreateUserDialog} maxWidth="xs" fullWidth>
           <DialogTitle>Add Runtime User</DialogTitle>
           <DialogContent>
             {createUserError && (
@@ -1045,10 +1046,10 @@ export default function Environment({
               {createMiUser.isPending ? 'Creating…' : 'Create'}
             </Button>
           </DialogActions>
-        </Dialog>
+        </Dialog>}
 
         {/* Delete MI User confirmation dialog */}
-        <Dialog
+        {legacyRuntimeUsersEnabled && <Dialog
           open={deleteUserTarget !== null}
           onClose={() => {
             setDeleteUserTarget(null);
@@ -1095,7 +1096,7 @@ export default function Environment({
               {deleteMiUser.isPending ? 'Deleting…' : 'Delete'}
             </Button>
           </DialogActions>
-        </Dialog>
+        </Dialog>}
 
         <Divider sx={{ my: 2 }} />
         {componentType === 'MI' && (
@@ -1113,7 +1114,7 @@ export default function Environment({
         {(componentType !== 'MI' || viewMode === 'entryPoints') && (
           <EntryPointsList envId={env.id} componentId={componentId} projectId={projectId} componentType={componentType} displayType={displayType} isOnline={isOnline} onOpenDrawer={onOpenDrawerForTab} onSelectionChange={setCurrentEntryPoint} />
         )}
-        {componentType === 'MI' && viewMode === 'allArtifacts' && <ArtifactTypeSelector envId={env.id} projectId={projectId} componentId={componentId} onSelectArtifact={onSelectArtifact} />}
+        {componentType === 'MI' && viewMode === 'allArtifacts' && <ArtifactTypeSelector envId={env.id} projectId={projectId} componentId={componentId} onSelectArtifact={onSelectArtifact} onOpenMIOperations={openMIOperations} />}
       </CardContent>
     </Card>
   );

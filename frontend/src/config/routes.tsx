@@ -41,6 +41,7 @@ import ForceChangePassword from '../pages/ForceChangePassword';
 import ManageLoggers from '../pages/ManageLoggers';
 import AuditLogs from '../pages/AuditLogs';
 import Deployments from '../pages/Deployments';
+import MIOperations from '../pages/MIOperations';
 import { ScopeResolver, generateMatrixRoutes, withScope, type Matrix } from '../nav';
 import { createElement } from 'react';
 import ErrorPage from '../pages/Error';
@@ -60,6 +61,7 @@ const MATRIX: Matrix = {
   environments: { segment: 'environments', pages: { organizations: Environments, projects: Environments } },
   'audit-logs': { segment: 'audit-logs', pages: { organizations: AuditLogs } },
   deployments: { segment: 'deployments', pages: { organizations: Deployments } },
+  'mi-operations': { segment: 'mi-operations', pages: { components: MIOperations } },
   'access-control': { segment: 'settings/access-control/:tab', pages: { organizations: OrgAccessControl, projects: ProjectAccessControl, components: ComponentAccessControl } },
 };
 

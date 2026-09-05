@@ -1,12 +1,14 @@
 import {
   Alert, Box, Button, Chip, CircularProgress, Dialog, DialogActions, DialogContent,
-  DialogTitle, FormControl, InputLabel, MenuItem, Select, Stack, Typography,
+  DialogTitle, FormControl, InputLabel, MenuItem, Select, Stack, TextField, Typography,
 } from '@wso2/oxygen-ui';
 import { RefreshCw, Server, X } from '@wso2/oxygen-ui-icons-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { fetchLogFileContent, useRuntimes } from '../api/queries';
+import { fetchLogFileContent, useRuntimes, type GqlRuntime } from '../api/queries';
 import { authenticatedFetch } from '../auth/tokenManager';
 import { miServerApiUrl } from '../config/api';
+import { useAccessControl } from '../contexts/AccessControlContext';
+import { Permissions } from '../constants/permissions';
 
 type ServerAction = 'shutdown' | 'shutdownGracefully' | 'restart' | 'restartGracefully';
 type Phase = 'idle' | 'confirm' | 'sending' | 'monitoring' | 'success' | 'pending' | 'error';
@@ -92,19 +94,24 @@ function ServerInfoCard({ info }: { info: ServerInfo }) {
   </Stack>;
 }
 
-export function ServerManagementPanel({ envId, projectId, componentId }: { envId: string; projectId: string; componentId: string }) {
-  const { data: runtimes = [], isLoading: runtimesLoading, refetch: refetchRuntimes } = useRuntimes(envId, projectId, componentId);
+export function ServerManagementPanel({ envId, projectId, componentId, runtimes: controlledRuntimes, selectedRuntimeId, canManage }: { envId: string; projectId: string; componentId: string; runtimes?: GqlRuntime[]; selectedRuntimeId?: string; canManage?: boolean }) {
+  const { data: fetchedRuntimes = [], isLoading: runtimesLoading, refetch: refetchRuntimes } = useRuntimes(envId, projectId, componentId, !controlledRuntimes);
+  const runtimes = controlledRuntimes ?? fetchedRuntimes;
   const miRuntimes = useMemo(() => runtimes.filter((runtime) => runtime.runtimeType.toUpperCase().includes('MI')), [runtimes]);
-  const [runtimeId, setRuntimeId] = useState('');
+  const [localRuntimeId, setLocalRuntimeId] = useState('');
+  const runtimeId = selectedRuntimeId ?? localRuntimeId;
   const [info, setInfo] = useState<ServerInfo | null>(null);
+  const [shutdownConfirmation, setShutdownConfirmation] = useState('');
   const [loading, setLoading] = useState(false);
   const [readError, setReadError] = useState('');
   const [operation, setOperation] = useState<Operation | null>(null);
   const activeRef = useRef(false);
+  const { hasAnyPermission } = useAccessControl();
+  const effectiveCanManage = canManage ?? hasAnyPermission([Permissions.INTEGRATION_MANAGE], projectId, componentId);
 
   useEffect(() => {
-    if (!runtimeId && miRuntimes.length) setRuntimeId((miRuntimes.find((runtime) => runtime.status === 'RUNNING') || miRuntimes[0]).runtimeId);
-  }, [miRuntimes, runtimeId]);
+    if (!runtimeId && miRuntimes.length && !selectedRuntimeId) setLocalRuntimeId((miRuntimes.find((runtime) => runtime.status === 'RUNNING') || miRuntimes[0]).runtimeId);
+  }, [miRuntimes, runtimeId, selectedRuntimeId]);
   const selectedRuntime = miRuntimes.find((runtime) => runtime.runtimeId === runtimeId);
 
   const getServer = useCallback(async (id: string): Promise<{ ok: boolean; status: number; body: string; info?: ServerInfo }> => {
@@ -125,7 +132,15 @@ export function ServerManagementPanel({ envId, projectId, componentId }: { envId
     finally { setLoading(false); }
   }, [getServer, runtimeId]);
 
-  useEffect(() => { if (runtimeId) void refresh(runtimeId); }, [runtimeId]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    activeRef.current = false;
+    setInfo(null);
+    setOperation(null);
+    setShutdownConfirmation('');
+    setReadError('');
+    if (runtimeId) void refresh(runtimeId);
+    return () => { activeRef.current = false; };
+  }, [runtimeId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const updateLog = useCallback(async (current: Operation, id: string): Promise<Partial<Operation>> => {
     try {
@@ -138,10 +153,12 @@ export function ServerManagementPanel({ envId, projectId, componentId }: { envId
     activeRef.current = true;
     let current = initial;
     for (let check = 1; check <= MAX_CHECKS; check += 1) {
+      if (!activeRef.current) return;
       if (!allowImmediate) await new Promise((resolve) => setTimeout(resolve, CHECK_INTERVAL));
+      if (!activeRef.current) return;
       allowImmediate = false;
-      const runtimeResult = await refetchRuntimes();
-      const currentRuntime = (runtimeResult.data || []).find((r) => r.runtimeId === runtimeId) || (runtimeResult.data || []).find((r) => r.runtimeName === initial.runtimeName);
+       const runtimeResult = controlledRuntimes ? { data: controlledRuntimes } : await refetchRuntimes();
+       const currentRuntime = (runtimeResult.data || []).find((r) => r.runtimeId === runtimeId) || (runtimeResult.data || []).find((r) => r.runtimeName === initial.runtimeName);
       const id = currentRuntime?.runtimeId || runtimeId;
       let result: { ok: boolean; status: number; body: string; info?: ServerInfo } | undefined;
       try { result = await getServer(id); } catch { result = undefined; }
@@ -163,7 +180,7 @@ export function ServerManagementPanel({ envId, projectId, componentId }: { envId
     }
     activeRef.current = false;
     setOperation({ ...current, phase: 'pending' });
-  }, [getServer, refetchRuntimes, runtimeId, updateLog]);
+  }, [controlledRuntimes, getServer, refetchRuntimes, runtimeId, updateLog]);
 
   const beginAction = useCallback(async (action: ServerAction) => {
     if (!selectedRuntime || activeRef.current) return;
@@ -188,7 +205,7 @@ export function ServerManagementPanel({ envId, projectId, componentId }: { envId
   if (!miRuntimes.length) return <Alert severity="info">No MI runtimes are associated with this environment.</Alert>;
   return <Stack spacing={2}>
     <Stack direction="row" spacing={1} alignItems="center">
-      <FormControl size="small" sx={{ minWidth: 280 }}><InputLabel>MI runtime</InputLabel><Select value={runtimeId} label="MI runtime" onChange={(event) => { setRuntimeId(event.target.value); setInfo(null); }} disabled={busy}>{miRuntimes.map((runtime) => <MenuItem key={runtime.runtimeId} value={runtime.runtimeId}>{runtime.runtimeName || runtime.runtimeId} — {runtime.status}</MenuItem>)}</Select></FormControl>
+       {!selectedRuntimeId && <FormControl size="small" sx={{ minWidth: 280 }}><InputLabel>MI runtime</InputLabel><Select value={runtimeId} label="MI runtime" onChange={(event) => { setLocalRuntimeId(event.target.value); setInfo(null); }} disabled={busy}>{miRuntimes.map((runtime) => <MenuItem key={runtime.runtimeId} value={runtime.runtimeId}>{runtime.runtimeName || runtime.runtimeId} — {runtime.status}</MenuItem>)}</Select></FormControl>}
       <Button startIcon={<RefreshCw size={16} />} onClick={() => void refresh()} disabled={loading || busy}>Refresh</Button>
     </Stack>
     {selectedRuntime && <Typography variant="body2" color="text.secondary">Source runtime: {selectedRuntime.runtimeName || selectedRuntime.runtimeId} <Chip size="small" label={selectedRuntime.status} sx={{ ml: 1 }} /></Typography>}
@@ -196,13 +213,19 @@ export function ServerManagementPanel({ envId, projectId, componentId }: { envId
     {loading && <CircularProgress size={24} />}
     {info && <ServerInfoCard info={info} />}
     <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-      {(['restartGracefully', 'restart'] as ServerAction[]).map((action) => <Button key={action} variant="outlined" color={action === 'restart' ? 'error' : 'primary'} startIcon={<Server size={15} />} onClick={() => setOperation({ action, runtimeName: selectedRuntime?.runtimeName || runtimeId, phase: 'confirm', checks: 0, baselineLog: '', logLines: [], sawUnavailable: false, unavailableChecks: 0, available: true })} disabled={busy || selectedRuntime?.status !== 'RUNNING'}>{ACTION_LABELS[action]}</Button>)}
+       {effectiveCanManage && <>
+         <Button variant="outlined" startIcon={<Server size={15} />} onClick={() => setOperation({ action: 'restartGracefully', runtimeName: selectedRuntime?.runtimeName || runtimeId, phase: 'confirm', checks: 0, baselineLog: '', logLines: [], sawUnavailable: false, unavailableChecks: 0, available: true })} disabled={busy || selectedRuntime?.status !== 'RUNNING'}>Graceful Restart</Button>
+         <Button variant="outlined" color="error" startIcon={<Server size={15} />} onClick={() => setOperation({ action: 'restart', runtimeName: selectedRuntime?.runtimeName || runtimeId, phase: 'confirm', checks: 0, baselineLog: '', logLines: [], sawUnavailable: false, unavailableChecks: 0, available: true })} disabled={busy || selectedRuntime?.status !== 'RUNNING'}>Restart</Button>
+         <Button variant="text" onClick={() => setOperation({ action: 'shutdownGracefully', runtimeName: selectedRuntime?.runtimeName || runtimeId, phase: 'confirm', checks: 0, baselineLog: '', logLines: [], sawUnavailable: false, unavailableChecks: 0, available: true })} disabled={busy || selectedRuntime?.status !== 'RUNNING'}>Graceful Shutdown</Button>
+         <Button variant="text" color="error" onClick={() => setOperation({ action: 'shutdown', runtimeName: selectedRuntime?.runtimeName || runtimeId, phase: 'confirm', checks: 0, baselineLog: '', logLines: [], sawUnavailable: false, unavailableChecks: 0, available: true })} disabled={busy || selectedRuntime?.status !== 'RUNNING'}>Shutdown</Button>
+       </>}
     </Stack>
     <Dialog open={!!operation} onClose={() => { if (!busy) setOperation(null); }} maxWidth="md" fullWidth>
       <DialogTitle>{operation?.phase === 'confirm' ? `Confirm ${operation ? ACTION_LABELS[operation.action] : ''}` : operation?.phase === 'success' ? 'Operation completed' : operation?.phase === 'pending' ? 'Confirmation pending' : 'Server operation'}</DialogTitle>
-      <DialogContent><Stack spacing={1.5}>
+       <DialogContent><Stack spacing={1.5}>
         {operation && <Typography>Runtime: <strong>{operation.runtimeName}</strong> · Action: <strong>{ACTION_LABELS[operation.action]}</strong> · Check: {operation.checks}/{MAX_CHECKS}</Typography>}
-        {operation?.phase === 'confirm' && <Typography>Are you sure you want to execute this operation on the MI runtime?</Typography>}
+         {operation?.phase === 'confirm' && <Typography>Are you sure you want to execute this operation on the MI runtime?</Typography>}
+         {operation?.phase === 'confirm' && operation.action.startsWith('shutdown') && <TextField label="Type the runtime name to confirm" value={shutdownConfirmation} onChange={(event) => setShutdownConfirmation(event.target.value)} helperText={`Enter ${operation.runtimeName}`} fullWidth autoFocus />}
         {operation && operation.phase !== 'confirm' && <Alert severity={operation.phase === 'success' ? 'success' : operation.phase === 'error' ? 'error' : operation.phase === 'pending' ? 'warning' : 'info'}>{operation.phase === 'success' ? 'The server operation was confirmed by runtime availability.' : operation.phase === 'pending' ? 'Command accepted, but operation was not confirmed within two minutes.' : operation.error || 'Monitoring runtime availability and logs…'}</Alert>}
         {operation?.httpStatus !== undefined && <Typography variant="body2">HTTP status: {operation.httpStatus}{operation.responseMessage ? ` — ${operation.responseMessage}` : ''}</Typography>}
         {operation?.responseBody && <Box component="pre" sx={{ maxHeight: 140, overflow: 'auto', p: 1, bgcolor: 'action.hover', fontSize: 12 }}>{operation.responseBody}</Box>}
@@ -211,7 +234,7 @@ export function ServerManagementPanel({ envId, projectId, componentId }: { envId
       </Stack></DialogContent>
       <DialogActions>
         <Button onClick={() => setOperation(null)} disabled={busy} startIcon={<X size={15} />}>Close</Button>
-        {operation?.phase === 'confirm' && <Button variant="contained" color={operation.action.startsWith('shutdown') || operation.action === 'restart' ? 'error' : 'primary'} onClick={() => void beginAction(operation.action)}>Confirm</Button>}
+         {operation?.phase === 'confirm' && <Button variant="contained" color={operation.action.startsWith('shutdown') || operation.action === 'restart' ? 'error' : 'primary'} onClick={() => void beginAction(operation.action)} disabled={operation.action.startsWith('shutdown') && shutdownConfirmation !== operation.runtimeName}>Confirm</Button>}
         {(operation?.phase === 'pending' || operation?.phase === 'error') && <Button variant="contained" onClick={retryStatus} disabled={busy}>Check status</Button>}
       </DialogActions>
     </Dialog>

@@ -153,6 +153,16 @@ class RuntimeLogsScenariosTest extends BaseObservabilityE2ETest {
     }
 
     private void assertMiRuntimeInventoryAndOperations() {
+        page.navigate(config.url("/organizations/default/projects/" + project + "/components/" + miComponent + "/mi-operations"));
+        assertThat(page.getByRole(AriaRole.HEADING, new Page.GetByRoleOptions().setName("MI Operations"))).isVisible();
+        assertThat(page.getByRole(AriaRole.TAB, new Page.GetByRoleOptions().setName("Server").setExact(true))).isVisible();
+        assertThat(page.getByRole(AriaRole.TAB, new Page.GetByRoleOptions().setName("Carbon Applications").setExact(true))).isVisible();
+        assertThat(page.getByRole(AriaRole.TAB, new Page.GetByRoleOptions().setName("Registry").setExact(true))).isVisible();
+        assertThat(page.getByRole(AriaRole.TAB, new Page.GetByRoleOptions().setName("Runtime Users").setExact(true))).isVisible();
+
+        page.navigate(config.url("/organizations/default/projects/" + project + "/components/" + biComponent + "/mi-operations"));
+        assertThat(page.getByText("MI Operations is available only for WSO2 Integrator: MI integrations.")).isVisible();
+
         page.navigate(config.url("/organizations/default/projects/" + project + "/components/" + miComponent + "/runtimes"));
         assertThat(page.getByRole(AriaRole.HEADING, new Page.GetByRoleOptions().setName("Runtime"))).isVisible();
         Locator card = environmentCard();

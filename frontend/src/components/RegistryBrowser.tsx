@@ -4,7 +4,7 @@
  * WSO2 LLC. licenses this file under the Apache License, Version 2.0.
  */
 /** Registry browser and runtime-scoped Registry Resource controls. */
-import { type JSX, useState } from 'react';
+import { type JSX, useEffect, useRef, useState } from 'react';
 import { Box, CircularProgress, Typography, Alert, Button, Stack, Dialog, DialogTitle, DialogContent, DialogActions, TextField, MenuItem, Select, FormControl, InputLabel } from '@wso2/oxygen-ui';
 import { ArrowUp, Plus } from '@wso2/oxygen-ui-icons-react';
 import { useQueryClient } from '@tanstack/react-query';
@@ -26,12 +26,30 @@ interface RegistryBrowserProps {
   initialPath?: string;
 }
 
-export function RegistryBrowser({ runtimeId, componentId, environmentId, projectId, runtimes = [], initialPath = 'registry' }: RegistryBrowserProps): JSX.Element {
+export function RegistryBrowser({ runtimeId, componentId, environmentId, projectId, runtimes = [], initialPath = 'registry', selectedRuntimeId: controlledRuntimeId, canEdit: controlledCanEdit, onPathChange }: RegistryBrowserProps & { selectedRuntimeId?: string; canEdit?: boolean; onPathChange?: (path: string) => void }): JSX.Element {
   const availableRuntimes = runtimes.length > 0 ? runtimes : [{ runtimeId, runtimeName: runtimeId, status: 'RUNNING' }];
   const defaultRuntime = availableRuntimes.find((item) => item.status === 'RUNNING')?.runtimeId || runtimeId;
   const [selectedRuntimeId, setSelectedRuntimeId] = useState(defaultRuntime);
-  const selectedRuntime = availableRuntimes.find((item) => item.runtimeId === selectedRuntimeId);
-  const { currentPath, pathSegments, navigateToSegment, navigateInto, navigateUp } = useRegistryNavigation(initialPath);
+  const effectiveRuntimeId = controlledRuntimeId ?? selectedRuntimeId;
+  const selectedRuntime = availableRuntimes.find((item) => item.runtimeId === effectiveRuntimeId);
+  const { currentPath, pathSegments, navigateToPath, navigateToSegment, navigateInto, navigateUp } = useRegistryNavigation(initialPath);
+  const lastInitialPath = useRef<string | null>(null);
+  useEffect(() => { onPathChange?.(currentPath); }, [currentPath, onPathChange]);
+
+  // `currentPath` is local state and changes immediately when the user clicks
+  // a directory. The parent then persists that path in the URL and sends it
+  // back as `initialPath`. If this effect also depends on `currentPath`, it can
+  // observe the old URL value in the same render and navigate back to the old
+  // directory, creating a config <-> registry loop. Sync only when the URL
+  // value itself changes; local navigation remains authoritative until then.
+  useEffect(() => {
+    const normalized = initialPath.startsWith('/') ? initialPath.slice(1) : initialPath;
+    if (lastInitialPath.current === normalized) return;
+    lastInitialPath.current = normalized;
+    const valid = normalized === 'registry' || /^registry\/(config|governance)(\/|$)/.test(normalized);
+    if (valid && normalized !== currentPath) navigateToPath(normalized);
+    if (!valid && currentPath !== 'registry') navigateToSegment(-1);
+  }, [currentPath, initialPath, navigateToPath, navigateToSegment]);
   const [selectedFile, setSelectedFile] = useState<{ item: GqlRegistryDirectoryItem; path: string } | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<{ name: string; path: string } | null>(null);
@@ -43,8 +61,8 @@ export function RegistryBrowser({ runtimeId, componentId, environmentId, project
   const [busy, setBusy] = useState(false);
   const queryClient = useQueryClient();
   const { hasAnyPermission } = useAccessControl();
-  const canEdit = hasAnyPermission([Permissions.INTEGRATION_EDIT, Permissions.INTEGRATION_MANAGE], projectId, componentId);
-  const { data: directoryData, isLoading, error } = useRegistryDirectory(selectedRuntimeId, currentPath, false);
+  const canEdit = controlledCanEdit ?? hasAnyPermission([Permissions.INTEGRATION_EDIT, Permissions.INTEGRATION_MANAGE], projectId, componentId);
+  const { data: directoryData, isLoading, error } = useRegistryDirectory(effectiveRuntimeId, currentPath, false);
 
   const refreshRegistry = () => {
     void queryClient.invalidateQueries({ queryKey: ['registryDirectory'] });
@@ -61,7 +79,7 @@ export function RegistryBrowser({ runtimeId, componentId, environmentId, project
     if (!trimmedName || !mediaType.trim() || isAtRoot) return;
     setBusy(true); setMutationError(null);
     try {
-      await createRegistryResource(componentId, environmentId, selectedRuntimeId, `${currentPath}/${trimmedName}`, mediaType.trim(), resourceFile || resourceContent, trimmedName);
+      await createRegistryResource(componentId, environmentId, effectiveRuntimeId, `${currentPath}/${trimmedName}`, mediaType.trim(), resourceFile || resourceContent, trimmedName);
       setAddOpen(false); setResourceName(''); setResourceContent(''); setResourceFile(null); refreshRegistry();
     } catch (e) { setMutationError(e instanceof Error ? e.message : 'Failed to create Registry Resource.'); }
     finally { setBusy(false); }
@@ -69,7 +87,7 @@ export function RegistryBrowser({ runtimeId, componentId, environmentId, project
   const confirmDelete = async () => {
     if (!deleteTarget) return;
     setBusy(true); setMutationError(null);
-    try { await deleteRegistryResource(componentId, environmentId, selectedRuntimeId, deleteTarget.path); setDeleteTarget(null); setSelectedFile(null); refreshRegistry(); }
+    try { await deleteRegistryResource(componentId, environmentId, effectiveRuntimeId, deleteTarget.path); setDeleteTarget(null); setSelectedFile(null); refreshRegistry(); }
     catch (e) { setMutationError(e instanceof Error ? e.message : 'Failed to delete Registry Resource.'); }
     finally { setBusy(false); }
   };
@@ -78,12 +96,12 @@ export function RegistryBrowser({ runtimeId, componentId, environmentId, project
     <Stack direction="row" alignItems="center" spacing={2} sx={{ mb: 2, flexWrap: 'wrap' }}>
       {!isAtRoot && <Button variant="text" size="small" startIcon={<ArrowUp size={16} />} onClick={navigateUp}>Up</Button>}
       <Box sx={{ flex: 1 }}><RegistryBreadcrumb pathSegments={pathSegments} onNavigate={(index) => navigateToSegment(index)} /></Box>
-      <FormControl size="small" sx={{ minWidth: 220 }}>
+      {!controlledRuntimeId && <FormControl size="small" sx={{ minWidth: 220 }}>
         <InputLabel id="registry-runtime-label">Runtime</InputLabel>
         <Select labelId="registry-runtime-label" label="Runtime" value={selectedRuntimeId} onChange={(event) => handleRuntimeChange(event.target.value as string)}>
           {availableRuntimes.map((runtime) => <MenuItem key={runtime.runtimeId} value={runtime.runtimeId} disabled={runtime.status !== 'RUNNING'}>{runtime.runtimeName || runtime.runtimeId}{runtime.status !== 'RUNNING' ? ` (${runtime.status || 'offline'})` : ''}</MenuItem>)}
         </Select>
-      </FormControl>
+      </FormControl>}
       {canEdit && <Button variant="contained" size="small" startIcon={<Plus size={16} />} onClick={() => setAddOpen(true)} disabled={isAtRoot || selectedRuntime?.status !== 'RUNNING'}>Add Resource</Button>}
     </Stack>
     {mutationError && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setMutationError(null)}>{mutationError}</Alert>}
@@ -92,7 +110,7 @@ export function RegistryBrowser({ runtimeId, componentId, environmentId, project
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>{directoryData.count} item{directoryData.count !== 1 ? 's' : ''}</Typography>
       <RegistryDirectoryView items={directoryData.items} onNavigateInto={navigateInto} onSelectFile={handleSelectFile} canEdit={canEdit} onDeleteFile={(item) => setDeleteTarget({ name: item.name, path: `${currentPath}/${item.name}` })} />
     </> : <Typography color="text.secondary" sx={{ py: 4, textAlign: 'center' }}>No data available</Typography>}
-    {selectedFile && <RegistryFileViewer runtimeId={selectedRuntimeId} componentId={componentId} environmentId={environmentId} filePath={selectedFile.path} item={selectedFile.item} onClose={() => setSelectedFile(null)} canEdit={canEdit} onChanged={refreshRegistry} />}
+    {selectedFile && <RegistryFileViewer runtimeId={effectiveRuntimeId} componentId={componentId} environmentId={environmentId} filePath={selectedFile.path} item={selectedFile.item} onClose={() => setSelectedFile(null)} canEdit={canEdit} onChanged={refreshRegistry} />}
     <Dialog open={addOpen} onClose={() => !busy && setAddOpen(false)} fullWidth maxWidth="sm">
       <DialogTitle>Add Registry Resource</DialogTitle><DialogContent><Stack spacing={2} sx={{ pt: 1 }}>
         <Typography variant="body2" color="text.secondary">Create under {currentPath} on {selectedRuntime?.runtimeName || selectedRuntimeId}.</Typography>
