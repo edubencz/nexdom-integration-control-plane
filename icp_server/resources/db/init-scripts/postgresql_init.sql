@@ -1446,6 +1446,66 @@ CREATE TABLE reconcile_backoff (
     next_attempt BIGINT NOT NULL DEFAULT 0,
     PRIMARY KEY (runtime_id, artifact_name, artifact_type, state_key)
 );
+
+-- ============================================================================
+-- MI DEPLOYMENTS
+-- ============================================================================
+
+CREATE TABLE mi_deployment_artifacts (
+    artifact_id VARCHAR(36) PRIMARY KEY,
+    file_name VARCHAR(255) NOT NULL,
+    artifact_name VARCHAR(255) NOT NULL,
+    artifact_version VARCHAR(100) NOT NULL,
+    sha256 VARCHAR(64) NOT NULL,
+    file_size BIGINT NOT NULL,
+    content BYTEA NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE mi_deployment_operations (
+    deployment_id VARCHAR(36) PRIMARY KEY,
+    org_id INT NOT NULL,
+    org_handler VARCHAR(255) NOT NULL,
+    artifact_id VARCHAR(36) NOT NULL,
+    status VARCHAR(40) NOT NULL,
+    created_by VARCHAR(255) NOT NULL,
+    parent_deployment_id VARCHAR(36),
+    version INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE mi_deployment_targets (
+    target_id VARCHAR(36) PRIMARY KEY,
+    deployment_id VARCHAR(36) NOT NULL REFERENCES mi_deployment_operations(deployment_id) ON DELETE CASCADE,
+    project_id VARCHAR(36) NOT NULL,
+    component_id VARCHAR(36) NOT NULL,
+    environment_id VARCHAR(36) NOT NULL,
+    runtime_id VARCHAR(36) NOT NULL,
+    production BOOLEAN NOT NULL,
+    eligible BOOLEAN NOT NULL,
+    conflict BOOLEAN NOT NULL,
+    delete_before_upload BOOLEAN NOT NULL DEFAULT FALSE,
+    phase VARCHAR(40) NOT NULL,
+    attempt INT NOT NULL DEFAULT 0,
+    lease_until TIMESTAMPTZ,
+    http_status INT,
+    reason VARCHAR(1000),
+    message VARCHAR(4000),
+    evidence TEXT,
+    updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE mi_deployment_events (
+    event_id VARCHAR(36) PRIMARY KEY,
+    deployment_id VARCHAR(36) NOT NULL REFERENCES mi_deployment_operations(deployment_id) ON DELETE CASCADE,
+    target_id VARCHAR(36),
+    phase VARCHAR(40) NOT NULL,
+    message VARCHAR(4000) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL
+);
+
 -- ============================================================================
 -- SAMPLE DATA FOR TESTING
 -- ============================================================================
