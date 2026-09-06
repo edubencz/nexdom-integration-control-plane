@@ -364,13 +364,16 @@ public isolated function getTryItTarget(string componentId, string environmentId
             AND r.environment_id = ${environmentId} AND r.status = 'RUNNING'
             AND l.listener_port = ${port}`, usableTryItHostPredicate());
     stream<record {|string host; string protocol;|}, sql:Error?> rs = dbClient->query(query);
-    record {|string host; string protocol;|}[] rows = check from var r in rs
-        limit 1
-        select r;
-    if rows.length() == 0 {
+    record {|record {|string host; string protocol;|} value;|}|sql:Error? row = rs.next();
+    error? closeError = rs.close();
+    if row is sql:Error {
+        return row;
+    }
+    check closeError;
+    if row is () {
         return ();
     }
-    return {host: rows[0].host, protocol: rows[0].protocol};
+    return {host: row.value.host, protocol: row.value.protocol};
 }
 
 // Resolves an MI API target from ICP-owned runtime/artifact records. The host is
@@ -386,13 +389,16 @@ public isolated function getMiTryItTarget(string componentId, string environment
             AND r.environment_id = ${environmentId} AND r.runtime_type = 'MI'
             AND r.status = 'RUNNING' AND a.api_name = ${apiName}
     `);
-    record {|string? host; string api_url; string? context;|}[] rows = check from var r in rs
-        limit 1
-        select r;
-    if rows.length() == 0 || rows[0].host is () {
+    record {|record {|string? host; string api_url; string? context;|} value;|}|sql:Error? row = rs.next();
+    error? closeError = rs.close();
+    if row is sql:Error {
+        return row;
+    }
+    check closeError;
+    if row is () || row.value.host is () {
         return ();
     }
-    string apiUrl = rows[0].api_url;
+    string apiUrl = row.value.api_url;
     int? schemeEnd = apiUrl.indexOf("://");
     if schemeEnd is () {
         return error("Invalid MI API URL");
@@ -412,8 +418,8 @@ public isolated function getMiTryItTarget(string componentId, string environment
     if port < 1 || port > 65535 {
         return error("Invalid MI API listener port");
     }
-    string context = rows[0].context ?: apiUrl.substring(pathStart);
-    return {host: rows[0].host ?: "", protocol, port, context};
+    string context = row.value.context ?: apiUrl.substring(pathStart);
+    return {host: row.value.host ?: "", protocol, port, context};
 }
 
 // Base URLs (scheme://host:port) of RUNNING runtimes' registered listeners with a usable
