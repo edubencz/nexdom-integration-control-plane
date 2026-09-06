@@ -333,3 +333,86 @@ function testMIInboundEndpointAcceptsNullProtocol() returns error? {
 
     cleanupRuntime(runtimeId);
 }
+
+// =============================================================================
+// Test: Try-It target lookups release their SQL result sets.
+//
+// The target lookup used a Ballerina `limit 1` over a SQL stream. That stops
+// iteration before the connector can automatically close the result set, so
+// repeated Try-It requests eventually exhausted the H2 pool.
+// =============================================================================
+@test:Config {
+    groups: ["heartbeat", "tryit"]
+}
+function testTryItTargetLookupDoesNotExhaustPool() returns error? {
+    string runtimeId = "aa000001-test-test-test-000000000012";
+    cleanupRuntime(runtimeId);
+
+    types:Heartbeat heartbeat = buildHeartbeat(runtimeId, "hb-tryit-runtime");
+    heartbeat.tryItHost = "127.0.0.1";
+    heartbeat.artifacts = {
+        listeners: [{name: "tryitListener", package: "app", protocol: "HTTP",
+            host: "0.0.0.0", port: 8080, state: "enabled"}]
+    };
+    types:HeartbeatResponse response = check storage:processHeartbeat(heartbeat, preResolved = true);
+    test:assertTrue(response.acknowledged, "Try-It BI heartbeat should be acknowledged");
+
+    foreach int _ in 0 ..< 20 {
+        types:TryItTarget? target = check storage:getTryItTarget(
+            HB_COMPONENT_ID, HB_ENV_ID, runtimeId, 8080);
+        test:assertTrue(target is types:TryItTarget, "BI Try-It target should resolve");
+        if target is types:TryItTarget {
+            test:assertEquals(target.host, "127.0.0.1");
+            test:assertEquals(target.protocol, "HTTP");
+        }
+    }
+
+    types:TryItTarget? missingTarget = check storage:getTryItTarget(
+        HB_COMPONENT_ID, HB_ENV_ID, runtimeId, 9999);
+    test:assertEquals(missingTarget, (), "Unknown BI listener should not resolve");
+
+    // A separate lookup proves that all target result sets returned their
+    // connections to the pool after the repeated calls above.
+    types:Runtime? runtime = check storage:getRuntimeById(runtimeId);
+    test:assertNotEquals(runtime, (), "Runtime lookup should remain available");
+
+    cleanupRuntime(runtimeId);
+}
+
+@test:Config {
+    groups: ["heartbeat", "tryit"]
+}
+function testMiTryItTargetLookupDoesNotExhaustPool() returns error? {
+    string runtimeId = "aa000001-test-test-test-000000000013";
+    cleanupRuntime(runtimeId);
+
+    types:Heartbeat heartbeat = buildMIHeartbeat(runtimeId);
+    heartbeat.runtimeHostname = "127.0.0.1";
+    heartbeat.artifacts = {
+        apis: [{name: "tryitApi", url: "http://127.0.0.1:8290/orders",
+            context: "/orders", state: "enabled"}]
+    };
+    types:HeartbeatResponse response = check storage:processHeartbeat(heartbeat, preResolved = true);
+    test:assertTrue(response.acknowledged, "Try-It MI heartbeat should be acknowledged");
+
+    foreach int _ in 0 ..< 20 {
+        types:MiTryItTarget? target = check storage:getMiTryItTarget(
+            HB_COMPONENT_ID, HB_ENV_ID, runtimeId, "tryitApi");
+        test:assertTrue(target is types:MiTryItTarget, "MI Try-It target should resolve");
+        if target is types:MiTryItTarget {
+            test:assertEquals(target.host, "127.0.0.1");
+            test:assertEquals(target.protocol, "http");
+            test:assertEquals(target.port, 8290);
+            test:assertEquals(target.context, "/orders");
+        }
+    }
+
+    types:MiTryItTarget? missingTarget = check storage:getMiTryItTarget(
+        HB_COMPONENT_ID, HB_ENV_ID, runtimeId, "missingApi");
+    test:assertEquals(missingTarget, (), "Unknown MI API should not resolve");
+
+    types:Runtime? runtime = check storage:getRuntimeById(runtimeId);
+    test:assertNotEquals(runtime, (), "Runtime lookup should remain available");
+
+    cleanupRuntime(runtimeId);
+}

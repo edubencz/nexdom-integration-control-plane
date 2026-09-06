@@ -65,9 +65,10 @@ dbType = "h2"
 dbName = "icp_test_db"
 dbUser = "icp_user"
 dbPassword = "icp_password"
+maxOpenConnections = 3
+minIdleConnections = 1
 heartbeatTimeoutSeconds = 30
 
 [[ballerina.log.modules]]
 name = "wso2/icp_server"
 level = "DEBUG"
-
