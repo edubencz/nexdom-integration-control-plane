@@ -78,6 +78,7 @@ function init() returns error? {
     if ssoConfig.passwordLoginDisabled || ssoConfig.federatedAccessControlEnabled {
         check validateSSOConfig(ssoConfig);
     }
+    check validateMIDeploymentVerificationConfig();
 
     // Initialize audit logging
     storage:initAuditLogging(enableAuditLogging, auditLogFilePath);

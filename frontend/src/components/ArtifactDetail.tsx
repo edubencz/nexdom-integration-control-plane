@@ -41,7 +41,7 @@ import {
   Tabs,
   Typography,
 } from '@wso2/oxygen-ui';
-import { ChevronDown, ChevronRight, Maximize2, RefreshCw, Server, Trash2, Upload, X } from '@wso2/oxygen-ui-icons-react';
+import { ChevronDown, ChevronRight, Download, Maximize2, RefreshCw, Server, Trash2, Upload, X } from '@wso2/oxygen-ui-icons-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { fetchLogFileContent, useArtifactTypes, useArtifactPage, useRuntimes, ARTIFACT_QUERY_MAP, type GqlArtifact } from '../api/queries';
 import { useUpdateArtifactStatus, useUpdateListenerState } from '../api/mutations';
@@ -68,7 +68,7 @@ import { ARTIFACT_ICONS, ARTIFACT_TABS, DEFAULT_ARTIFACT_TABS, ENTRY_POINT_TYPE_
 import { useQueryClient } from '@tanstack/react-query';
 import { RegistryBrowser } from './RegistryBrowser';
 import { authenticatedFetch } from '../auth/tokenManager';
-import { miApplicationsApiUrl } from '../config/api';
+import { miApplicationDownloadApiUrl, miApplicationsApiUrl } from '../config/api';
 import { ServerManagementPanel } from './ServerManagementPanel';
 import { useLayout } from '../contexts/LayoutContext';
 
@@ -519,6 +519,7 @@ function CarbonApplicationsPanel({ envId, projectId, componentId, onSelectArtifa
   const [applicationToDelete, setApplicationToDelete] = useState<CarbonApplication | null>(null);
   const [deleteFeedback, setDeleteFeedback] = useState<DeleteFeedback | null>(null);
   const [loadingApplication, setLoadingApplication] = useState<string | null>(null);
+  const [downloadingApplication, setDownloadingApplication] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const addOperationRef = useRef<AddOperation | null>(null);
 
@@ -577,6 +578,51 @@ function CarbonApplicationsPanel({ envId, projectId, componentId, onSelectArtifa
       setError(e instanceof Error ? e.message : 'Failed to load Carbon Application details.');
     } finally {
       setLoadingApplication(null);
+    }
+  };
+
+  const downloadApplication = async (app: CarbonApplication) => {
+    if (!runtimeId) return;
+    const applicationKey = `${app.name}-${app.version ?? ''}`;
+    setDownloadingApplication(applicationKey);
+    setError(null);
+    try {
+      // The backend proxy supplies the runtime HMAC token and requests the
+      // octet-stream representation; the browser never receives that token.
+      const fileNames = carbonApplicationFileNames(app).map((fileName) => `${fileName}.car`);
+      let response: Response | undefined;
+      let downloadedFileName = fileNames[0];
+      let lastError: Error | undefined;
+      for (const fileName of fileNames) {
+        const candidateResponse = await authenticatedFetch(miApplicationDownloadApiUrl(componentId, envId, runtimeId, fileName));
+        if (candidateResponse.ok) {
+          response = candidateResponse;
+          downloadedFileName = fileName;
+          break;
+        }
+        const payload = await candidateResponse.json().catch(() => ({}));
+        lastError = new Error(responseMessage(payload) || `Carbon Application download failed with HTTP ${candidateResponse.status}.`);
+        if (candidateResponse.status !== 404) throw lastError;
+      }
+      if (!response) throw lastError || new Error('Carbon Application download failed.');
+      const blob = await response.blob();
+      const disposition = response.headers.get('Content-Disposition') || '';
+      const dispositionMatch = disposition.match(/filename\*?=(?:UTF-8''|\")?([^;\"]+)/i);
+      const fileName = dispositionMatch?.[1]
+        ? decodeURIComponent(dispositionMatch[1].trim().replace(/^\"|\"$/g, ''))
+        : downloadedFileName;
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to download Carbon Application.');
+    } finally {
+      setDownloadingApplication(null);
     }
   };
 
@@ -884,6 +930,9 @@ function CarbonApplicationsPanel({ envId, projectId, componentId, onSelectArtifa
                     Version {app.version || '—'} · {app.state === 'faulty' ? 'Faulty' : 'Active'}
                   </Typography>
                 </Box>
+                <IconButton size="small" aria-label={`Download ${app.name}`} onClick={() => void downloadApplication(app)} disabled={busy || downloadingApplication !== null}>
+                  {downloadingApplication === applicationKey ? <CircularProgress size={16} /> : <Download size={16} />}
+                </IconButton>
                 <IconButton size="small" color="error" aria-label={`Delete ${app.name}`} onClick={() => void deleteApplication(app)} disabled={busy}>
                   <Trash2 size={16} />
                 </IconButton>

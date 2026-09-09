@@ -13,6 +13,13 @@ runtimeListenerPort = 9445
 # =============================================================================
 schedulerIntervalSeconds = 600
 
+# Short verification windows keep runtime-state tests deterministic and fast.
+miDeploymentVerifyAttempts = 5
+miDeploymentVerifyIntervalSeconds = 1
+miDeploymentVerifyStableSeconds = 2
+miDeploymentVerifyTimeoutSeconds = 4
+miDeploymentDeleteVerifyTimeoutSeconds = 4
+
 # =============================================================================
 # LOGGING CONFIGURATION
 # =============================================================================

@@ -664,14 +664,18 @@ public isolated function fetchRegistryResourceProperties(http:Client mgmtClient,
 
 // Fetch the fault stack trace for a faulty Composite App from the MI management API
 // GET /management/applications/{appName}/fault
-public isolated function fetchCompositeAppFaultStackTrace(http:Client mgmtClient, string hmacToken, string appName) returns string|error {
+public isolated function fetchCompositeAppFaultDiagnostic(http:Client mgmtClient, string hmacToken, string appName) returns MgmtCompositeAppFaultResponse|error {
     string encodedAppName = check url:encode(appName, "UTF-8");
     string path = string `${MGMT_API_PATH}/applications/${encodedAppName}/fault`;
-    log:printDebug("Calling MI management API for Composite App fault stacktrace", path = path);
-    MgmtCompositeAppFaultResponse respResult = check mgmtClient->get(path, {
+    log:printDebug("Calling MI management API for Composite App fault diagnostic", path = path);
+    return check mgmtClient->get(path, {
         [HEADER_AUTHORIZATION]: string `Bearer ${hmacToken}`,
         [HEADER_ACCEPT]: CONTENT_TYPE_JSON
     });
+}
+
+public isolated function fetchCompositeAppFaultStackTrace(http:Client mgmtClient, string hmacToken, string appName) returns string|error {
+    MgmtCompositeAppFaultResponse respResult = check fetchCompositeAppFaultDiagnostic(mgmtClient, hmacToken, appName);
     string? stackTrace = respResult?.faultStackTrace;
     if stackTrace is () {
         log:printWarn("No fault stack trace found for Composite App", appName = appName);

@@ -19,6 +19,15 @@ from the last update time or present-day runtime names.
 - Events: chronological phase/message records with reason, HTTP status and JSON
   evidence. Rechecks append events and do not change the original execution time.
 
+Runtime deployment verification waits for the management API to report the exact
+application as active for the configured stability window. The default polling
+interval is 4 seconds, the stability window is 12 seconds, and the verification
+budget is 120 seconds per target. A successful upload whose application remains
+missing is recorded as INDETERMINATE. Faulty applications retain the runtime
+error message and, when MI exposes it, the bounded fault stack trace from
+`GET /management/applications/{name}/fault`. Deletion decisions are confirmed by
+two consecutive missing observations before a replacement upload starts.
+
 History and referenced artifacts have no automatic expiration. Manual deletion
 requires deployment management permission and is rejected for RUNNING/CANCELLING
 operations. An artifact is removed only after its final referencing operation is

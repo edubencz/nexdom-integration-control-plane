@@ -9,14 +9,25 @@ const int MI_TEST_PORT = 19661;
 string miMockState = "missing";
 int miMockUploadCode = 200;
 int miMockUploads = 0;
+int miMockApplicationGets = 0;
+int miMockFaultGets = 0;
 string miMockAfterUpload = "active";
+string miMockFaultMessage = "Simulated runtime deployment failure";
+string miMockFaultStack = "org.apache.synapse.SynapseException: simulated failure";
 string miTestSecret = "";
 string[] miTestOperations = [];
 listener http:Listener miMockListener = new (MI_TEST_PORT, {secureSocket: {key: {path: keystorePath, password: resolvedKeystorePassword}}});
 service /management/applications on miMockListener {
     resource function get .() returns json {
+        miMockApplicationGets += 1;
         return {activeList: miMockState == "active" ? [{name: "history-test", version: "1.0.0"}] : [],
             faultyList: miMockState == "faulty" ? [{name: "history-test", version: "1.0.0"}] : []};
+    }
+
+    resource function get [string application]/fault() returns json {
+        miMockFaultGets += 1;
+        if miMockState != "faulty" { return {"error": "Faulty application not found"}; }
+        return {name: application, version: "1.0.0", errorMessage: miMockFaultMessage, faultStackTrace: miMockFaultStack};
     }
     resource function post .() returns http:Response {
         miMockUploads += 1;
@@ -145,8 +156,22 @@ function testMIDeploymentSuccessAndSkippedTargets() returns error? {
     test:assertEquals(finished.operation.status, types:COMPLETED_WITH_ISSUES);
     test:assertTrue(finished.operation.durationMs is int);
     test:assertEquals(finished.targets.filter(t => t.phase == types:SUCCEEDED).length(), 1);
+    test:assertTrue(miMockApplicationGets >= 3, "Active state must be observed across the stability window");
     test:assertEquals(finished.targets.filter(t => t.phase == types:SKIPPED_INELIGIBLE).length(), 1);
     test:assertEquals(finished.targets.filter(t => t.phase == types:SUCCEEDED)[0].attempt, 1);
+}
+
+@test:Config {groups: ["mi-deployments"]}
+function testMIDeploymentWaitsForRemovalBeforeReplacement() returns error? {
+    miMockState = "active"; miMockUploadCode = 200; miMockAfterUpload = "active";
+    DeploymentMemory memory = check miFixture();
+    types:MIDeploymentTarget target = miTarget(memory.operation.deploymentId);
+    target.deleteBeforeUpload = true;
+    check miReady(memory, [target]);
+    int before = miMockUploads;
+    var finished = check miRun(memory);
+    test:assertEquals(finished.targets[0].phase, types:SUCCEEDED);
+    test:assertEquals(miMockUploads, before + 1, "Replacement upload starts only after removal confirmation");
 }
 
 @test:Config {groups: ["mi-deployments"]}
@@ -185,6 +210,8 @@ function testMIDeploymentFaultyAndConflict() returns error? {
     check miReady(memory, [miTarget(memory.operation.deploymentId)]);
     var faulty = check miRun(memory);
     test:assertEquals(faulty.targets[0].phase, types:FAULTY);
+    test:assertTrue(faulty.targets[0].evidence.some(e => e.indexOf("simulated failure") >= 0));
+    test:assertTrue(miMockFaultGets > 0);
     memory = check miFixture();
     check miReady(memory, [miTarget(memory.operation.deploymentId)]);
     int before = miMockUploads;
@@ -200,6 +227,7 @@ function testMIDeploymentTimeoutRecheckPreservesDuration() returns error? {
     check miReady(memory, [miTarget(memory.operation.deploymentId)]);
     var timedOut = check miRun(memory);
     test:assertEquals(timedOut.targets[0].phase, types:INDETERMINATE);
+    test:assertEquals(timedOut.targets[0].reason, "VERIFICATION_TIMEOUT");
     int? elapsed = timedOut.targets[0].durationMs;
     miMockState = "active";
     http:Response response = check miApi->post(string `/${memory.operation.deploymentId}/recheck`, {targetId: timedOut.targets[0].targetId}, {Authorization: createAuthHeader(adminToken)});

@@ -719,11 +719,13 @@ function EventsDrawer({ org, operation, targetId, onClose }: { org: string; oper
           <Field title="Message">{target.message || '\u2014'}</Field>
           {target.evidence?.length > 0 && (
             <Field title="Evidence">
-              {target.evidence.map((item, index) => (
-                <Typography key={index} variant="body2" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
-                  {item}
-                </Typography>
-              ))}
+              <Box sx={{ maxHeight: 280, overflowY: 'auto' }}>
+                {target.evidence.map((item, index) => (
+                  <Typography key={index} variant="body2" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
+                    {item}
+                  </Typography>
+                ))}
+              </Box>
             </Field>
           )}
         </Stack>
@@ -761,7 +763,7 @@ function EventsDrawer({ org, operation, targetId, onClose }: { org: string; oper
               </Typography>
             )}
             {event.evidence?.map((text, index) => (
-              <Typography key={index} variant="caption" display="block" sx={{ overflowWrap: 'anywhere' }}>
+              <Typography key={index} variant="caption" display="block" sx={{ overflowWrap: 'anywhere', whiteSpace: 'pre-wrap', maxHeight: 280, overflowY: 'auto' }}>
                 {text}
               </Typography>
             ))}
