@@ -460,19 +460,25 @@ public isolated function getEnvironmentByHandler(string environmentHandler) retu
     };
 }
 
-// Get environment ID by handler
+// Get environment ID by handler.
+//
+// `queryRow` rather than a stream: every heartbeat resolves its environment through here, so a
+// connection this function fails to return is a connection the pool never sees again. Consuming
+// a stream returns the connection only on the paths that reach the end of it — an error from the
+// query, or a client that disconnects mid-request, leaves it borrowed forever, and ten of those
+// retire the pool. `queryRow` owns the connection for the whole call and hands it back on every
+// path, including its own error.
 public isolated function getEnvironmentIdByHandler(string environmentHandler) returns string|error {
-    stream<record {|string environment_id;|}, sql:Error?> envStream = dbClient->query(`
+    record {|string environment_id;|}|sql:Error row = dbClient->queryRow(`
         SELECT environment_id FROM environments WHERE handler = ${environmentHandler}
     `);
-
-    record {|string environment_id;|}[] envRecords = check from record {|string environment_id;|} env in envStream
-        select env;
-
-    if envRecords.length() == 0 {
+    if row is sql:NoRowsError {
         return error(string `Environment with handler '${environmentHandler}' not found.`);
     }
-    return envRecords[0].environment_id;
+    if row is sql:Error {
+        return error(string `Failed to resolve environment handler '${environmentHandler}'.`, row);
+    }
+    return row.environment_id;
 }
 
 // Check environment handler availability

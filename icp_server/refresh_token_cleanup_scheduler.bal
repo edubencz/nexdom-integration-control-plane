@@ -24,15 +24,19 @@ class RefreshTokenCleanupJob {
 
     *task:Job;
 
-    // Executes this function when the scheduled trigger fires
+    // Executes this function when the scheduled trigger fires. Trapped for the same
+    // reason as the offline sweep: a panic escaping execute() kills the schedule.
     public function execute() {
-        do {
-            log:printInfo("Starting refresh token cleanup job");
-            check storage:cleanupExpiredRefreshTokens();
-            log:printInfo("Refresh token cleanup completed successfully");
-        } on fail error e {
-            log:printError("Failed to cleanup expired refresh tokens", e);
+        error? result = trap self.tick();
+        if result is error {
+            log:printError("Failed to cleanup expired refresh tokens", result);
         }
+    }
+
+    function tick() returns error? {
+        log:printInfo("Starting refresh token cleanup job");
+        check storage:cleanupExpiredRefreshTokens();
+        log:printInfo("Refresh token cleanup completed successfully");
     }
 
 }
