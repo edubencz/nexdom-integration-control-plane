@@ -25,10 +25,34 @@ import ballerina/uuid;
 // Runtime hash cache for delta heartbeat optimization
 final cache:Cache hashCache = new (capacity = 1000, evictionFactor = 0.2);
 
+// Serializes the heartbeat transactions. Concurrent heartbeats (four integrations beat
+// within the same fraction of a second) race inside the sql driver: queryRow throws
+// java.util.ConcurrentModificationException from the Java layer, and when that happens
+// inside the transaction below, the transaction's pooled connection is abandoned — it
+// never reaches Postgres (its last statement there is still the previous borrower's), and
+// Hikari never sees it again. Ten such races retire the pool and every request that needs
+// the database times out at 30s. Heartbeats arrive a handful per ten seconds and the
+// transaction takes milliseconds, so serializing them costs nothing and removes the race's
+// trigger on the one path where the failure eats a connection.
+isolated int heartbeatTxGate = 0;
+
 // Process full heartbeat.
 // When preResolved=true, heartbeat.environment/.project/.component are already UUIDs
 // (set by the kid-based heartbeat endpoint) — skip name-to-ID resolution.
 public isolated function processHeartbeat(types:Heartbeat heartbeat, boolean preResolved = false) returns types:HeartbeatResponse|error {
+    lock {
+        heartbeatTxGate += 1;
+        // The lock's isolation rules require cloned transfers; a heartbeat is a small record
+        // and there are a handful of them per ten seconds, so the copies are free.
+        types:HeartbeatResponse|error response = processHeartbeatSerialized(heartbeat.clone(), preResolved);
+        if response is error {
+            return response;
+        }
+        return response.clone();
+    }
+}
+
+isolated function processHeartbeatSerialized(types:Heartbeat heartbeat, boolean preResolved) returns types:HeartbeatResponse|error {
     check validateHeartbeatProtocolAndRuntime(heartbeat);
     if !preResolved {
         check validateHeartbeatResolution(heartbeat);
@@ -38,6 +62,9 @@ public isolated function processHeartbeat(types:Heartbeat heartbeat, boolean pre
     boolean isNewRegistration = false;
     boolean fullHeartbeatRequired = false;
     string runtimeId = heartbeat.runtimeId;
+    // Counted once inside the transaction and read again by the audit line below: walking a
+    // large artifact payload twice for the same unmutated data is pure waste.
+    int artifactCount = 0;
 
     transaction {
         previousStatus = check upsertRuntime(heartbeat);
@@ -61,28 +88,39 @@ public isolated function processHeartbeat(types:Heartbeat heartbeat, boolean pre
             }
         }
 
-        // Create audit log entry
-        string action = isNewRegistration ? "REGISTER" : "HEARTBEAT";
-        int totalArtifacts = countTotalArtifacts(heartbeat.artifacts);
-        if (totalArtifacts == 0) {
+        artifactCount = countTotalArtifacts(heartbeat.artifacts);
+        if (artifactCount == 0) {
             fullHeartbeatRequired = true;
             log:printWarn(string `No artifacts reported in heartbeat for runtime ${runtimeId}`);
         }
-        _ = check dbClient->execute(`
-            INSERT INTO audit_logs (
-                runtime_id, action, details
-            ) VALUES (
-                ${runtimeId}, ${action},
-                ${string `Runtime ${action.toLowerAscii()} processed with ${totalArtifacts} total artifacts (${heartbeat.artifacts.services.length()} services,
-                 ${heartbeat.artifacts.listeners.length()} listeners)`}
-            )
-        `);
         check commit;
-        log:printDebug(string `Successfully processed ${action.toLowerAscii()} for runtime ${runtimeId} with ${totalArtifacts} total artifacts`);
 
     } on fail error e {
         log:printError(string `Failed to process heartbeat for runtime ${runtimeId}`, e);
         return error(string `Failed to process heartbeat for runtime ${runtimeId}`, e);
+    }
+
+    // The audit line is written AFTER the commit, outside any transaction, on purpose.
+    // Its insert takes a FOR KEY SHARE lock on the parent runtimes row; inside the
+    // heartbeat transaction that lock was held for the whole artifact bulk-insert, and a
+    // single session stalling there queued the table-wide offline sweep — and, behind the
+    // sweep, every other runtime's heartbeat. Auto-committed here the lock lives for the
+    // insert alone. An audit line is a record of something that already happened, so its
+    // failure is reported but never fails the processed heartbeat.
+    string action = isNewRegistration ? "REGISTER" : "HEARTBEAT";
+    sql:ExecutionResult|sql:Error auditResult = dbClient->execute(`
+        INSERT INTO audit_logs (
+            runtime_id, action, details
+        ) VALUES (
+            ${runtimeId}, ${action},
+            ${string `Runtime ${action.toLowerAscii()} processed with ${artifactCount} total artifacts (${heartbeat.artifacts.services.length()} services,
+             ${heartbeat.artifacts.listeners.length()} listeners)`}
+        )
+    `);
+    if auditResult is sql:Error {
+        log:printWarn(string `Failed to write the audit line for runtime ${runtimeId}`, auditResult);
+    } else {
+        log:printDebug(string `Successfully processed ${action.toLowerAscii()} for runtime ${runtimeId} with ${artifactCount} total artifacts`);
     }
 
     // Notify WebSocket subscribers only when status actually changes (or on first registration).
@@ -546,23 +584,37 @@ isolated function upsertRuntime(types:Heartbeat heartbeat) returns string?|error
     // Check if a stale OFFLINE runtime with the same component/env/name but different ID exists.
     // Restricting to OFFLINE prevents live sibling replicas in multi-replica deployments from
     // being mistakenly treated as "old restarted instances" and deleted.
-    stream<record {|string runtime_id;|}, sql:Error?> existingByName;
+    //
+    // queryRow, deliberately: this lookup expects at most one row, and a `query` stream that
+    // errors mid-consumption is abandoned without being closed — its pooled connection is
+    // leased forever. Under concurrent heartbeats that is exactly what happened: a burst of
+    // failed consumptions drained the pool permanently, and every periodic job then died with
+    // "Connection is not available". queryRow has no stream lifecycle to leak.
+    //
+    // The check-for-error-except-NoRowsError dance below repeats at every at-most-one-row read,
+    // because queryRow reports absence as an error. It cannot be factored into a shared
+    // `queryOptionalRow` helper: forwarding the caller's row type needs a dependently-typed
+    // function, and the compiler rejects one with a Ballerina body ("a function with a
+    // non-'external' function body cannot be a dependently-typed function"). A helper that
+    // erased the row type to `record {}` would only move the cast to every call site.
+    record {|string runtime_id;|}|sql:Error existingByName;
     if runtimeName is string {
-        existingByName = dbClient->query(`
+        existingByName = dbClient->queryRow(`
             SELECT runtime_id FROM runtimes
             WHERE component_id = ${heartbeat.component} AND environment_id = ${heartbeat.environment} AND name = ${runtimeName} AND status = 'OFFLINE'
         `);
     } else {
-        existingByName = dbClient->query(`
+        existingByName = dbClient->queryRow(`
             SELECT runtime_id FROM runtimes
             WHERE component_id = ${heartbeat.component} AND environment_id = ${heartbeat.environment} AND name IS NULL AND status = 'OFFLINE'
         `);
     }
-    record {|string runtime_id;|}[] existingByNameRows = check from record {|string runtime_id;|} r in existingByName
-        select r;
+    if existingByName is sql:Error && !(existingByName is sql:NoRowsError) {
+        return existingByName;
+    }
 
-    if existingByNameRows.length() > 0 {
-        string oldId = existingByNameRows[0].runtime_id;
+    if existingByName is record {|string runtime_id;|} {
+        string oldId = existingByName.runtime_id;
         if oldId != runtimeId {
             log:printInfo(string `Runtime ID changed from ${oldId} to ${runtimeId} for ${runtimeName ?: "null"}`);
             log:printDebug(string `Deleting old runtime ${oldId} via reconcile cleanup flow`);
@@ -572,14 +624,17 @@ isolated function upsertRuntime(types:Heartbeat heartbeat) returns string?|error
         }
     }
 
-    // Determine new-vs-existing and capture previous status before the upsert
-    stream<record {|string runtime_id; string status;|}, sql:Error?> existingById = dbClient->query(`
+    // Determine new-vs-existing and capture previous status before the upsert.
+    // queryRow for the same reason as above: no stream to leak when it fails.
+    record {|string runtime_id; string status;|}|sql:Error existingById = dbClient->queryRow(`
         SELECT runtime_id, status FROM runtimes WHERE runtime_id = ${runtimeId}
     `);
-    record {|string runtime_id; string status;|}[] existingByIdRows = check from var r in existingById
-        select r;
-    boolean isNewRegistration = existingByIdRows.length() == 0;
-    string? previousStatus = isNewRegistration ? () : existingByIdRows[0].status;
+    if existingById is sql:Error && !(existingById is sql:NoRowsError) {
+        return existingById;
+    }
+    boolean isNewRegistration = existingById is sql:NoRowsError;
+    string? previousStatus = existingById is record {|string runtime_id; string status;|}
+            ? existingById.status : ();
 
     // Atomic upsert for PostgreSQL, fallback to INSERT/UPDATE for others
     if dbType == POSTGRESQL {

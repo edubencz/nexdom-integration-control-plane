@@ -69,11 +69,21 @@ class Job {
     *task:Job;
 
     // Executes this function when the scheduled trigger fires.
+    //
+    // The whole tick runs under `trap`: a panic escaping execute() unschedules the job,
+    // and this job is the only thing that ever declares a silent runtime OFFLINE — one
+    // bad tick must never become a permanently dead sweep. (Observed in an incident:
+    // the periodic jobs stopped for good mid-outage, leaving the control plane a
+    // zombie until restart.) Errors are already values; trap covers what isn't.
     public function execute() {
-        error? e = storage:markOfflineRuntimes();
-        if (e is error) {
-            log:printError("Failed to mark offline runtimes", e);
+        error? result = trap self.tick();
+        if result is error {
+            log:printError("The offline runtime sweep tick failed", result);
         }
+    }
+
+    function tick() returns error? {
+        check storage:markOfflineRuntimes();
         // Runtimes that just went offline were deleted (K8S) or marked OFFLINE (VM);
         // drop the workflow proxy's cached clients for their callback URLs.
         pruneWorkflowClientCache();
