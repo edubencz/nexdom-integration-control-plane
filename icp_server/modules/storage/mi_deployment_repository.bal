@@ -229,7 +229,11 @@ public isolated function loadMIDeploymentOperation(string deploymentId) returns 
 }
 
 public isolated function miDeploymentPayload(types:MIDeploymentOperation o, types:MIDeploymentTarget[] targets, boolean detail = true) returns json {
-    map<json> payload = {id: o.deploymentId, orgHandler: o.orgHandler, status: o.status.toString(), createdBy: o.createdBy,
+    // Keep the immutable user id in storage, but expose the human-readable
+    // display name in history responses. If the account was removed, the
+    // resolver deliberately falls back to the original id.
+    string? author = getDisplayNameById(o.createdBy);
+    map<json> payload = {id: o.deploymentId, orgHandler: o.orgHandler, status: o.status.toString(), createdBy: author,
         parentDeploymentId: o.parentDeploymentId, createdAt: o.createdAt, updatedAt: o.updatedAt, startedAt: o.startedAt,
         finishedAt: o.finishedAt, durationMs: o.durationMs, selectedProjectIds: o.selectedProjectIds,
         fileName: o.fileName, artifactName: o.artifactName, artifactVersion: o.artifactVersion, fileSize: o.fileSize,
