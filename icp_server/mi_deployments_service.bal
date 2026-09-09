@@ -4,6 +4,7 @@
 import icp_server.auth;
 import icp_server.storage;
 import icp_server.types;
+import icp_server.mi_management;
 import ballerina/http;
 import ballerina/mime;
 import ballerina/time;
@@ -20,6 +21,14 @@ type DeploymentMemory record {|
     types:MIDeploymentOperation operation;
     types:MIDeploymentTarget[] targets;
     byte[] content;
+|};
+
+type ApplicationObservation record {|
+    string state;
+    string? name = ();
+    string? version = ();
+    string? errorMessage = ();
+    string? faultStackTrace = ();
 |};
 
 map<string> deploymentIdempotency = {};
@@ -158,48 +167,110 @@ function operationPayload(string orgHandler, string fileName, byte[] content, st
     return {operation, targets: [], content};
 }
 
-// Query the authoritative MI application state. The API exposes activeList and
-// faultyList; unknown/missing fields are intentionally ignored for compatibility.
-function applicationState(http:Client mgmt, string token, string name, string version) returns string|error {
-    http:Response response = check mgmt->get("/management/applications", {"Authorization": "Bearer " + token, "Accept": "application/json"});
-    if response.statusCode < 200 || response.statusCode >= 300 { return error(string `GET applications returned HTTP ${response.statusCode}`, httpStatus = response.statusCode); }
-    json payload = check response.getJsonPayload();
-    if payload is map<json> {
-        foreach string listKey in ["activeList", "faultyList"] {
-            json? list = payload[listKey];
-            if list is json[] {
-                foreach json item in list {
-                    if item is map<json> {
-                        string itemName = item["name"] is string ? <string>item["name"] : "";
-                        string itemVersion = item["version"] is string ? <string>item["version"] : "";
-                        boolean sameIdentity = itemName == name && (itemVersion == version || version == "unknown");
-                        // Older CARs may not expose metadata to ICP. In that case
-                        // MI commonly reports the base application name plus a
-                        // separate version, while the filename contains both.
-                        boolean filenameIdentity = version == "unknown" && itemName != "" && name.startsWith(itemName + "-");
-                        if sameIdentity || filenameIdentity { return listKey == "activeList" ? "active" : "faulty"; }
-                    }
-                }
-            }
-        }
-    }
-    return "missing";
+function verificationError(string message, int? status = (), string reason = "VERIFICATION_INVALID_RESPONSE") returns error {
+    if status is int { return error(message, httpStatus = status, verificationReason = reason); }
+    return error(message, verificationReason = reason);
 }
 
-function probeRuntimeConflict(types:Runtime runtime, string artifactName, string artifactVersion) returns boolean|error {
+function observationString(map<json> item, string key) returns string? {
+    json? value = item[key];
+    return value is string ? value : ();
+}
+
+function applicationMatches(string itemName, string itemVersion, string name, string version) returns boolean {
+    if itemName == "" || itemName.endsWith(".car") { return false; }
+    if version != "unknown" {
+        return itemName == name && itemVersion == version;
+    }
+    // A CAR without metadata can be represented by its complete name or by a
+    // runtime name plus a version suffix. Only complete filename candidates are
+    // accepted; a bare prefix is never enough.
+    string stem = name.endsWith(".car") ? name.substring(0, name.length() - 4) : name;
+    return itemName == stem || (itemVersion != "" &&
+        (itemName + "-" + itemVersion == stem || itemName + "_" + itemVersion == stem));
+}
+
+// Query the authoritative MI application state. Both lists are examined before
+// deciding: a matching faulty entry always wins over an active entry.
+function applicationState(http:Client mgmt, string token, string name, string version) returns ApplicationObservation|error {
+    http:Response response = check mgmt->get("/management/applications", {"Authorization": "Bearer " + token, "Accept": "application/json"});
+    if response.statusCode < 200 || response.statusCode >= 300 {
+        string reason = response.statusCode == 401 || response.statusCode == 403 ? "VERIFICATION_UNAUTHORIZED" :
+            (response.statusCode == 429 || response.statusCode >= 500 ? "VERIFICATION_TRANSIENT_HTTP" : "VERIFICATION_INVALID_RESPONSE");
+        return verificationError(string `GET /management/applications returned HTTP ${response.statusCode}`, response.statusCode, reason);
+    }
+    json|error payloadResult = response.getJsonPayload();
+    if payloadResult is error { return verificationError("Runtime returned an invalid applications JSON payload"); }
+    json payload = payloadResult;
+    if payload !is map<json> { return verificationError("Runtime returned a non-object applications payload"); }
+    ApplicationObservation? active = ();
+    ApplicationObservation? faulty = ();
+    int activeMatches = 0;
+    int faultyMatches = 0;
+    foreach [string, string] list in [["activeList", "active"], ["faultyList", "faulty"]] {
+        json? raw = payload[list[0]];
+        if raw is () || raw !is json[] { return verificationError(string `Runtime applications payload is missing ${list[0]}`); }
+        foreach json item in raw {
+            if item !is map<json> { continue; }
+            string itemName = observationString(item, "name") ?: "";
+            string itemVersion = observationString(item, "version") ?: "";
+            if !applicationMatches(itemName, itemVersion, name, version) { continue; }
+            ApplicationObservation observation = {state: list[1], name: itemName, version: itemVersion,
+                errorMessage: observationString(item, "errorMessage")};
+            if list[1] == "faulty" { faultyMatches += 1; faulty = observation; }
+            else { activeMatches += 1; active = observation; }
+        }
+    }
+    if faultyMatches > 1 || activeMatches > 1 || (faultyMatches > 0 && activeMatches > 1) {
+        return {state: "ambiguous", name: name, version: version};
+    }
+    if faulty is ApplicationObservation { return faulty; }
+    if active is ApplicationObservation { return active; }
+    return {state: "missing"};
+}
+
+function probeRuntimeConflict(types:Runtime runtime, string artifactName, string artifactVersion) returns ApplicationObservation|error {
     string baseUrl = check storage:buildManagementBaseUrl(runtime.managementHostname, runtime.managementPort);
-    http:Client|error clientResult = artifactsApiAllowInsecureTLS ? new (baseUrl, {secureSocket: {enable: false}}) : new (baseUrl);
+    http:ClientConfiguration clientConfig = {timeout: 10};
+    if artifactsApiAllowInsecureTLS { clientConfig.secureSocket = {enable: false}; }
+    http:Client|error clientResult = new (baseUrl, clientConfig);
     if clientResult is error { return clientResult; }
     string token = check storage:issueRuntimeHmacToken(runtime.runtimeId);
-    string|error state = applicationState(clientResult, token, artifactName, artifactVersion);
+    ApplicationObservation|error state = applicationState(clientResult, token, artifactName, artifactVersion);
     if state is error { return state; }
-    return state == "active" || state == "faulty";
+    return state;
 }
 
 function persistTargetState(string deploymentId, int targetIndex, types:MIDeploymentTarget target) returns error? {
     target.updatedAt = now();
     error? persisted = storage:saveMIDeploymentTarget(target);
     if persisted is error { return error("Deployment persistence failed", persisted); }
+}
+
+function verificationReason(error failure) returns string {
+    var reason = failure.detail()["verificationReason"];
+    return reason is string ? reason : "VERIFICATION_UNAVAILABLE";
+}
+
+function elapsedVerificationSeconds(time:Utc startedAt) returns decimal {
+    return time:utcDiffSeconds(time:utcNow(), startedAt);
+}
+
+function boundedEvidence(string value) returns string {
+    if value.length() <= 32768 { return value; }
+    string suffix = " [truncated]";
+    return value.substring(0, 32768 - suffix.length()) + suffix;
+}
+
+function applicationIdentity(DeploymentMemory memory) returns string {
+    return memory.operation.artifactVersion == "unknown" ? memory.operation.artifactName :
+        memory.operation.artifactName + "-" + memory.operation.artifactVersion;
+}
+
+function observeEvidence(ApplicationObservation observation) returns string {
+    string identity = observation.name ?: "unknown";
+    string version = observation.version ?: "unknown";
+    return string `GET /management/applications observed ${observation.state} (${identity}:${version}) at ${now()}`;
 }
 
 function uploadTarget(DeploymentMemory memory, types:MIDeploymentTarget target, string deploymentId, int targetIndex) returns [types:MIDeploymentTarget, string]|error {
@@ -209,13 +280,19 @@ function uploadTarget(DeploymentMemory memory, types:MIDeploymentTarget target, 
         target.phase = types:SKIPPED_INELIGIBLE; target.reason = "Runtime is not running"; return [target, "Runtime is not running"];
     }
     string baseUrl = check storage:buildManagementBaseUrl(runtimeResult.managementHostname, runtimeResult.managementPort);
-    http:Client|error clientResult = new (baseUrl, artifactsApiAllowInsecureTLS ? {secureSocket: {enable: false}} : {});
+    http:ClientConfiguration clientConfig = {timeout: 10};
+    if artifactsApiAllowInsecureTLS { clientConfig.secureSocket = {enable: false}; }
+    http:Client|error clientResult = new (baseUrl, clientConfig);
     if clientResult is error { return clientResult; }
     http:Client mgmtClient = clientResult;
     string token = check storage:issueRuntimeHmacToken(target.runtimeId);
-    string|error existing = applicationState(mgmtClient, token, memory.operation.artifactName, memory.operation.artifactVersion);
-    if existing is error { target.httpStatus = runtimeErrorStatus(existing); target.phase = types:INDETERMINATE; target.message = existing.message(); return [target, "Preflight verification failed"]; }
-    if (existing == "active" || existing == "faulty") && !target.deleteBeforeUpload {
+    ApplicationObservation|error existing = applicationState(mgmtClient, token, memory.operation.artifactName, memory.operation.artifactVersion);
+    if existing is error { target.httpStatus = runtimeErrorStatus(existing); target.reason = verificationReason(existing); target.phase = types:INDETERMINATE; target.message = existing.message(); return [target, "Preflight verification failed"]; }
+    if existing.state == "ambiguous" {
+        target.reason = "APPLICATION_IDENTITY_AMBIGUOUS"; target.phase = types:INDETERMINATE; target.message = "Runtime returned multiple matching application identities";
+        return [target, "Preflight identity is ambiguous"];
+    }
+    if (existing.state == "active" || existing.state == "faulty") && !target.deleteBeforeUpload {
         target.phase = types:SKIPPED_CONFLICT; target.reason = "Exact name/version already exists";
         return [target, "Conflict skipped"];
     }
@@ -244,10 +321,46 @@ function uploadTarget(DeploymentMemory memory, types:MIDeploymentTarget target, 
         if deleted.statusCode < 200 || deleted.statusCode >= 300 {
             target.phase = types:FAILED; target.reason = "DELETE_FAILED"; target.message = string `Unable to remove the existing Carbon Application (HTTP ${deleted.statusCode})`; return [target, "DELETE failed"];
         }
-        // A successful DELETE is the authoritative removal result. The
-        // applications listing may remain stale briefly after deletion, so an
-        // immediate GET must not prevent the subsequent CAR upload.
         target.phase = types:VERIFYING_DELETE;
+        target.message = "Delete accepted; waiting for runtime removal confirmation";
+        check persistTargetState(deploymentId, targetIndex, target);
+        time:Utc deleteStarted = time:utcNow();
+        int deleteChecks = 0;
+        int missingChecks = 0;
+        boolean removalConfirmed = false;
+        while deleteChecks < miDeploymentVerifyAttempts && elapsedVerificationSeconds(deleteStarted) <= <decimal>miDeploymentDeleteVerifyTimeoutSeconds {
+            ApplicationObservation|error removal = applicationState(mgmtClient, token, memory.operation.artifactName, memory.operation.artifactVersion);
+            deleteChecks += 1;
+            if removal is error {
+                missingChecks = 0;
+                target.reason = verificationReason(removal);
+                target.message = removal.message();
+                target.evidence.push(string `GET /management/applications returned HTTP ${runtimeErrorStatus(removal) ?: "no status"} at ${now()}`);
+                check persistTargetState(deploymentId, targetIndex, target);
+                if target.reason == "VERIFICATION_UNAUTHORIZED" || target.reason == "VERIFICATION_INVALID_RESPONSE" {
+                    target.phase = types:INDETERMINATE; return [target, "Delete verification unavailable"];
+                }
+            } else if removal.state == "ambiguous" {
+                target.phase = types:INDETERMINATE; target.reason = "APPLICATION_IDENTITY_AMBIGUOUS";
+                target.message = "Runtime returned multiple matching application identities while confirming removal";
+                return [target, "Delete verification is ambiguous"];
+            } else if removal.state == "missing" {
+                missingChecks += 1;
+                if missingChecks >= 2 { removalConfirmed = true; break; }
+            } else {
+                missingChecks = 0;
+            }
+            if !removalConfirmed && deleteChecks < miDeploymentVerifyAttempts && elapsedVerificationSeconds(deleteStarted) < <decimal>miDeploymentDeleteVerifyTimeoutSeconds {
+                runtime:sleep(<decimal>miDeploymentVerifyIntervalSeconds);
+            }
+        }
+        if !removalConfirmed {
+            target.phase = types:INDETERMINATE; target.reason = "DELETE_VERIFICATION_TIMEOUT";
+            target.message = "Delete was accepted but the runtime still reports the application or could not confirm its removal";
+            return [target, "Delete verification timed out"];
+        }
+        target.evidence.push(string `GET /management/applications confirmed removal at ${now()}`);
+        target.reason = ();
         check persistTargetState(deploymentId, targetIndex, target);
     }
     target.phase = types:UPLOADING; target.message = "Uploading Carbon Application";
@@ -267,20 +380,85 @@ function uploadTarget(DeploymentMemory memory, types:MIDeploymentTarget target, 
     }
     target.phase = types:VERIFYING_DEPLOY; target.message = "Upload accepted; verifying runtime application";
     check persistTargetState(deploymentId, targetIndex, target);
-    int remaining = miDeploymentVerifyAttempts;
-    while remaining > 0 {
-        string|error state = applicationState(mgmtClient, token, memory.operation.artifactName, memory.operation.artifactVersion);
-        if state == "active" { target.reason = (); target.phase = types:SUCCEEDED; target.message = "Runtime confirmed active"; return [target, "Succeeded"]; }
-        if state == "faulty" { target.reason = "RUNTIME_FAULTY"; target.phase = types:FAULTY; target.message = "Runtime reported faulty application"; return [target, "Faulty"]; }
-        if state is error { target.httpStatus = runtimeErrorStatus(state); target.phase = types:INDETERMINATE; target.message = state.message(); return [target, "Verification unavailable"]; }
-        remaining -= 1;
-        if remaining > 0 {
-            // Do not exhaust all verification attempts in a tight loop. MI may
-            // need several seconds to finish deploying the uploaded CAR.
+    time:Utc verificationStarted = time:utcNow();
+    time:Utc? activeSince = ();
+    string lastObservation = "";
+    int checks = 0;
+    while checks < miDeploymentVerifyAttempts && elapsedVerificationSeconds(verificationStarted) <= <decimal>miDeploymentVerifyTimeoutSeconds {
+        ApplicationObservation|error state = applicationState(mgmtClient, token, memory.operation.artifactName, memory.operation.artifactVersion);
+        checks += 1;
+        if state is error {
+            string reason = verificationReason(state);
+            target.httpStatus = runtimeErrorStatus(state);
+            if reason == "VERIFICATION_UNAUTHORIZED" || reason == "VERIFICATION_INVALID_RESPONSE" {
+                target.reason = reason; target.phase = types:INDETERMINATE; target.message = state.message(); return [target, "Verification unavailable"];
+            }
+            activeSince = ();
+            if lastObservation != "error:" + reason {
+                target.evidence.push(string `GET /management/applications returned ${reason} at ${now()}`);
+                target.message = "Runtime verification temporarily unavailable; retrying";
+                check persistTargetState(deploymentId, targetIndex, target);
+                lastObservation = "error:" + reason;
+            }
+        } else if state.state == "faulty" {
+            target.reason = "RUNTIME_FAULTY"; target.phase = types:FAULTY;
+            target.message = state.errorMessage ?: "Runtime reported faulty application";
+            target.evidence.push(observeEvidence(state));
+            string faultName = state.name ?: applicationIdentity(memory);
+            mi_management:MgmtCompositeAppFaultResponse|error diagnostic = mi_management:fetchCompositeAppFaultDiagnostic(mgmtClient, token, faultName);
+            if diagnostic is mi_management:MgmtCompositeAppFaultResponse {
+                boolean sameVersion = diagnostic.version is () || state.version is () || diagnostic.version == state.version;
+                if diagnostic.name == faultName && sameVersion {
+                    string? diagnosticMessage = diagnostic.errorMessage;
+                    if diagnosticMessage is string && diagnosticMessage.trim() != "" {
+                        target.message = diagnosticMessage;
+                    }
+                    string? diagnosticStack = diagnostic.faultStackTrace;
+                    if diagnosticStack is string && diagnosticStack.trim() != "" {
+                        target.evidence.push(boundedEvidence(string `Runtime fault stack trace:\n${diagnosticStack}`));
+                    } else {
+                        target.evidence.push("Runtime fault diagnostic did not include a stack trace");
+                    }
+                } else {
+                    target.evidence.push("Runtime fault diagnostic identity did not match the deployed application");
+                }
+            } else {
+                target.httpStatus = runtimeErrorStatus(diagnostic) ?: target.httpStatus;
+                target.evidence.push("Runtime did not expose a fault stack trace through /management/applications/{name}/fault");
+            }
+            return [target, "Faulty"];
+        } else if state.state == "ambiguous" {
+            target.reason = "APPLICATION_IDENTITY_AMBIGUOUS"; target.phase = types:INDETERMINATE;
+            target.message = "Runtime returned multiple matching application identities";
+            return [target, "Verification identity is ambiguous"];
+        } else if state.state == "active" {
+            if activeSince is () { activeSince = time:utcNow(); }
+            if lastObservation != "active" {
+                target.evidence.push(observeEvidence(state));
+                target.message = "Runtime reports active; waiting for stability confirmation";
+                check persistTargetState(deploymentId, targetIndex, target);
+                lastObservation = "active";
+            }
+            if activeSince is time:Utc && time:utcDiffSeconds(time:utcNow(), activeSince) >= <decimal>miDeploymentVerifyStableSeconds {
+                target.reason = (); target.phase = types:SUCCEEDED; target.message = "Runtime confirmed active and stable";
+                target.evidence.push(string `Active state remained stable for ${miDeploymentVerifyStableSeconds} seconds`);
+                return [target, "Succeeded"];
+            }
+        } else {
+            activeSince = ();
+            if lastObservation != "missing" {
+                target.evidence.push(observeEvidence(state));
+                target.message = "Upload accepted; application is not visible yet";
+                check persistTargetState(deploymentId, targetIndex, target);
+                lastObservation = "missing";
+            }
+        }
+        if checks < miDeploymentVerifyAttempts && elapsedVerificationSeconds(verificationStarted) < <decimal>miDeploymentVerifyTimeoutSeconds {
             runtime:sleep(<decimal>miDeploymentVerifyIntervalSeconds);
         }
     }
-    target.phase = types:INDETERMINATE; target.reason = "VERIFICATION_TIMEOUT"; target.message = "Upload accepted but runtime confirmation timed out";
+    target.phase = types:INDETERMINATE; target.reason = "VERIFICATION_TIMEOUT";
+    target.message = "Upload accepted but runtime confirmation timed out; consult the runtime logs for deployment errors";
     return [target, "Indeterminate"];
 }
 
@@ -290,15 +468,52 @@ function recheckTarget(DeploymentMemory memory, types:MIDeploymentTarget target)
     if runtimeResult is error || runtimeResult is () { target.phase = types:INDETERMINATE; target.message = "Runtime unavailable during recheck"; return target; }
     string|error base = storage:buildManagementBaseUrl(runtimeResult.managementHostname, runtimeResult.managementPort);
     if base is error { target.phase = types:INDETERMINATE; target.message = base.message(); return target; }
-    http:Client|error mgmt = artifactsApiAllowInsecureTLS ? new (base, {secureSocket: {enable: false}}) : new (base);
+    http:ClientConfiguration recheckConfig = {timeout: 10};
+    if artifactsApiAllowInsecureTLS { recheckConfig.secureSocket = {enable: false}; }
+    http:Client|error mgmt = new (base, recheckConfig);
     if mgmt is error { target.phase = types:INDETERMINATE; target.message = mgmt.message(); return target; }
     string|error token = storage:issueRuntimeHmacToken(target.runtimeId);
     if token is error { target.phase = types:INDETERMINATE; target.message = token.message(); return target; }
-    string|error state = applicationState(mgmt, token, memory.operation.artifactName, memory.operation.artifactVersion);
-    if state == "active" { target.reason = (); target.phase = types:SUCCEEDED; target.message = "Runtime confirmed active"; }
-    else if state == "faulty" { target.reason = "RUNTIME_FAULTY"; target.phase = types:FAULTY; target.message = "Runtime reported faulty application"; }
-    else if state is error { target.httpStatus = runtimeErrorStatus(state); target.phase = types:INDETERMINATE; target.message = state.message(); }
-    else { target.phase = types:INDETERMINATE; target.message = "Application not present"; }
+    time:Utc started = time:utcNow();
+    time:Utc? activeSince = ();
+    int checks = 0;
+    while checks < miDeploymentVerifyAttempts && elapsedVerificationSeconds(started) <= <decimal>miDeploymentVerifyTimeoutSeconds {
+        ApplicationObservation|error state = applicationState(mgmt, token, memory.operation.artifactName, memory.operation.artifactVersion);
+        checks += 1;
+        if state is error {
+            target.httpStatus = runtimeErrorStatus(state); target.reason = verificationReason(state);
+            target.phase = types:INDETERMINATE; target.message = "Recheck could not query the runtime: " + state.message(); activeSince = ();
+        } else if state.state == "active" {
+            if activeSince is () { activeSince = time:utcNow(); }
+            target.reason = (); target.message = "Recheck reports active; waiting for stability confirmation";
+            if activeSince is time:Utc && time:utcDiffSeconds(time:utcNow(), activeSince) >= <decimal>miDeploymentVerifyStableSeconds {
+                target.phase = types:SUCCEEDED; target.message = "Runtime confirmed active and stable during recheck"; return target;
+            }
+        } else if state.state == "faulty" {
+            target.reason = "RUNTIME_FAULTY"; target.phase = types:FAULTY;
+            target.message = state.errorMessage ?: "Runtime reported faulty application";
+            string faultName = state.name ?: applicationIdentity(memory);
+            mi_management:MgmtCompositeAppFaultResponse|error diagnostic = mi_management:fetchCompositeAppFaultDiagnostic(mgmt, token, faultName);
+            if diagnostic is mi_management:MgmtCompositeAppFaultResponse {
+                string? diagnosticStack = diagnostic.faultStackTrace;
+                if diagnosticStack is string && diagnosticStack.trim() != "" {
+                    target.evidence.push(boundedEvidence(string `Runtime fault stack trace:\n${diagnosticStack}`));
+                }
+            } else {
+                target.httpStatus = runtimeErrorStatus(diagnostic) ?: target.httpStatus;
+            }
+            return target;
+        } else if state.state == "ambiguous" {
+            target.reason = "APPLICATION_IDENTITY_AMBIGUOUS"; target.phase = types:INDETERMINATE;
+            target.message = "Runtime returned multiple matching application identities"; return target;
+        } else {
+            activeSince = (); target.reason = "VERIFICATION_TIMEOUT"; target.phase = types:INDETERMINATE;
+            target.message = "Recheck still cannot confirm the application";
+        }
+        if checks < miDeploymentVerifyAttempts && elapsedVerificationSeconds(started) < <decimal>miDeploymentVerifyTimeoutSeconds {
+            runtime:sleep(<decimal>miDeploymentVerifyIntervalSeconds);
+        }
+    }
     return target;
 }
 
@@ -451,9 +666,10 @@ service /icp/mi_deployments on httpListener {
                 boolean hasConflict = false;
                 string? reason = eligible ? () : "Runtime is not running or has no management endpoint";
                 if eligible {
-                    boolean|error probe = probeRuntimeConflict(runtime, memory.operation.artifactName, memory.operation.artifactVersion);
+                    ApplicationObservation|error probe = probeRuntimeConflict(runtime, memory.operation.artifactName, memory.operation.artifactVersion);
                     if probe is error { eligible = false; reason = "Unable to query Management API: " + probe.message(); }
-                    else { hasConflict = probe; }
+                    else if probe.state == "ambiguous" { eligible = false; reason = "APPLICATION_IDENTITY_AMBIGUOUS"; }
+                    else { hasConflict = probe.state == "active" || probe.state == "faulty"; }
                 }
                 memory.targets.push({targetId: uuid:createType4AsString(), deploymentId, projectId, projectName: project.name,
                     componentId: runtime.component.id, componentName: runtime.component.displayName, environmentId: runtime.environment.id,

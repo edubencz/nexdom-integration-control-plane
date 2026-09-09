@@ -146,8 +146,11 @@ configurable int auditLogCleanupIntervalSeconds = 86400;
 // Organization-wide MI Carbon Application deployment controls.
 configurable int miDeploymentMaxConcurrentProjects = 10;
 configurable int miDeploymentMaxCarSizeBytes = 104857600;
-configurable int miDeploymentVerifyAttempts = 10;
+configurable int miDeploymentVerifyAttempts = 31;
 configurable int miDeploymentVerifyIntervalSeconds = 4;
+configurable int miDeploymentVerifyStableSeconds = 12;
+configurable int miDeploymentVerifyTimeoutSeconds = 120;
+configurable int miDeploymentDeleteVerifyTimeoutSeconds = 120;
 configurable int miDeploymentArtifactRetentionDays = 7;
 configurable int miDeploymentHistoryRetentionDays = 90;
 configurable boolean enableMetrics = true;
@@ -286,5 +289,19 @@ public isolated function validateSSOConfig(types:SSOConfig config) returns error
                 return error("'ssoAdminValues' cannot contain empty values when 'passwordLoginDisabled' is true");
             }
         }
+    }
+}
+
+// Deployment verification must have enough budget to observe the configured
+// stability window and, for deletes, two consecutive missing observations.
+public isolated function validateMIDeploymentVerificationConfig() returns error? {
+    if miDeploymentVerifyAttempts < 1 { return error("'miDeploymentVerifyAttempts' must be positive"); }
+    if miDeploymentVerifyIntervalSeconds < 1 { return error("'miDeploymentVerifyIntervalSeconds' must be positive"); }
+    if miDeploymentVerifyStableSeconds < 1 { return error("'miDeploymentVerifyStableSeconds' must be positive"); }
+    if miDeploymentVerifyTimeoutSeconds < miDeploymentVerifyStableSeconds {
+        return error("'miDeploymentVerifyTimeoutSeconds' must cover the stability window");
+    }
+    if miDeploymentDeleteVerifyTimeoutSeconds < miDeploymentVerifyIntervalSeconds {
+        return error("'miDeploymentDeleteVerifyTimeoutSeconds' must allow consecutive removal checks");
     }
 }

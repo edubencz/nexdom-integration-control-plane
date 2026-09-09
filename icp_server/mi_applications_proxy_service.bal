@@ -89,7 +89,11 @@ function proxyMIApplications(string componentId, string environmentId, string ru
     string hmacToken = hmacTokenResult;
     request.removeHeader("Authorization");
     request.setHeader("Authorization", "Bearer " + hmacToken);
-    request.setHeader("Accept", "application/json");
+    // The regular GET is used by the UI to read the application metadata. A
+    // download request uses the same runtime resource with the octet-stream
+    // representation so the runtime returns the original .car bytes.
+    boolean download = request.getQueryParamValue("download") == "true";
+    request.setHeader("Accept", download ? "application/octet-stream" : "application/json");
 
     string suffix = "";
     if appPath.length() > 0 {

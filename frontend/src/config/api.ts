@@ -171,6 +171,11 @@ export const miTryitApiUrl = (componentId: string, environmentId: string, runtim
 export const miApplicationsApiUrl = (componentId: string, environmentId: string, runtimeId: string, appName?: string): string =>
   `${window.API_CONFIG.miApplicationsUrl.replace(/\/+$/, '')}/${encodeURIComponent(componentId)}/${encodeURIComponent(environmentId)}/${encodeURIComponent(runtimeId)}${appName ? `/${encodeURIComponent(appName)}` : ''}`;
 
+/** Builds the runtime-scoped Carbon Application download URL. The ICP proxy
+ * forwards this as an octet-stream request to the MI Management API. */
+export const miApplicationDownloadApiUrl = (componentId: string, environmentId: string, runtimeId: string, appName: string): string =>
+  `${miApplicationsApiUrl(componentId, environmentId, runtimeId, appName)}?download=true`;
+
 export const miServerApiUrl = (componentId: string, environmentId: string, runtimeId: string): string =>
   `${window.API_CONFIG.miServerUrl.replace(/\/+$/, '')}/${encodeURIComponent(componentId)}/${encodeURIComponent(environmentId)}/${encodeURIComponent(runtimeId)}`;
 

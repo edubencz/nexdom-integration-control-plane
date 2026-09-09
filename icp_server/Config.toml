@@ -134,6 +134,16 @@ frontendJwtHMACSecret = "default-secret-key-at-least-32-characters-long-for-hs25
 # =============================================================================
 # SSO (OIDC) CONFIGURATION
 # =============================================================================
+
+# MI Carbon Application deployment verification. An upload is considered
+# successful only after the runtime reports the exact application as active for
+# the stability window. The timeout applies per runtime target.
+# miDeploymentVerifyAttempts = 31
+# miDeploymentVerifyIntervalSeconds = 4
+# miDeploymentVerifyStableSeconds = 12
+# miDeploymentVerifyTimeoutSeconds = 120
+# miDeploymentDeleteVerifyTimeoutSeconds = 120
+
 # Single Sign-On using OpenID Connect (OIDC)
 # Enable this to allow users to authenticate with an external identity provider
 # This works alongside the pluggable authentication backend
