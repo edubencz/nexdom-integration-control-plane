@@ -227,16 +227,16 @@ frontendJwtHMACSecret = "default-secret-key-at-least-32-characters-long-for-hs25
 # maxConnectionLifeTime = 1800.0  # 30 minutes
 # dbType = "mysql"
 
-# PostgreSQL Configuration (commented out)
-# dbHost = "localhost"
-# dbPort = 5432
-# dbName = "icp_database"
-# dbUser = "postgres"
-# dbPassword = "my-secret-pw"
-# maxOpenConnections = 10
-# minIdleConnections = 5
-# maxConnectionLifeTime = 1800.0  # 30 minutes
-# dbType = "postgresql"
+# PostgreSQL Configuration
+dbHost = "localhost"
+dbPort = 5432
+dbName = "nexdom"
+dbUser = "postgres"
+dbPassword = "NexdomICP@2026"
+maxOpenConnections = 50
+minIdleConnections = 5
+maxConnectionLifeTime = 1800.0  # 30 minutes
+dbType = "postgresql"
 
 # Microsoft SQL Server (MSSQL) Configuration
 # dbHost = "localhost"

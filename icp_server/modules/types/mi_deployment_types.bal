@@ -43,7 +43,11 @@ public type MIDeploymentOperation record {|
     string createdBy;
     string createdAt;
     string updatedAt;
+    string? startedAt = ();
+    string? finishedAt = ();
+    int? durationMs = ();
     string? parentDeploymentId = ();
+    string[] selectedProjectIds = [];
 |};
 
 public type MIDeploymentTarget record {| 
@@ -68,6 +72,9 @@ public type MIDeploymentTarget record {|
     string? message = ();
     string[] evidence = [];
     string updatedAt;
+    string? startedAt = ();
+    string? finishedAt = ();
+    int? durationMs = ();
 |};
 
 public type MIDeploymentEvent record {| 
@@ -77,4 +84,7 @@ public type MIDeploymentEvent record {|
     string phase;
     string message;
     string createdAt;
+    string? reason = ();
+    int? httpStatus = ();
+    string[] evidence = [];
 |};

@@ -16,7 +16,7 @@
  * under the License.
  */
 
-import { Box, ColorSchemeImage, Divider, Grid, Link, Stack, Typography } from '@wso2/oxygen-ui';
+import { Box, ColorSchemeImage, Divider, Grid, Link, Stack } from '@wso2/oxygen-ui';
 import { type JSX } from 'react';
 import { Link as NavLink } from 'react-router';
 import LoginForm from '../components/LoginForm';

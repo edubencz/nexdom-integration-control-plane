@@ -1,482 +1,774 @@
-import { Alert, Box, Button, Checkbox, Chip, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle, Divider, FormControlLabel, IconButton, LinearProgress, ListingTable, PageContent, PageTitle, Stack, TablePagination, TextField, Tooltip, Typography } from '@wso2/oxygen-ui';
-import { ArrowLeft, CheckCircle2, FileText, RefreshCw, Trash2, Upload, XCircle } from '@wso2/oxygen-ui-icons-react';
-import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from 'react';
+import {
+  Alert,
+  Box,
+  Button,
+  Checkbox,
+  Chip,
+  CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  Divider,
+  Drawer,
+  FormControlLabel,
+  IconButton,
+  LinearProgress,
+  ListingTable,
+  MenuItem,
+  PageContent,
+  PageTitle,
+  Stack,
+  Step,
+  StepLabel,
+  Stepper,
+  TablePagination,
+  TextField,
+  Tooltip,
+  Typography,
+} from '@wso2/oxygen-ui';
+import { ArrowLeft, CheckCircle2, FileText, RefreshCw, Trash2, Upload, X, XCircle } from '@wso2/oxygen-ui-icons-react';
+import { useEffect, useRef, useState, type JSX, type ReactNode } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useSearchParams } from 'react-router';
 import type { OrgScope } from '../nav';
 import { useAccessControl } from '../contexts/AccessControlContext';
 import { Permissions } from '../constants/permissions';
 import { useProjects } from '../api/queries';
-import { cancelMiDeployment, createMiDeployment, deleteMiDeployment, executeMiDeployment, getMiDeployment, listMiDeployments, recheckMiDeployment, retryMiDeployment, saveMiTargetDecisions, startMiPreflight, type MiDeployment } from '../api/miDeployments';
+import {
+  cancelMiDeployment,
+  createMiDeployment,
+  deleteMiDeployment,
+  executeMiDeployment,
+  getMiDeployment,
+  getMiDeploymentEvents,
+  listMiDeployments,
+  retryMiDeployment,
+  recheckMiDeployment,
+  saveMiTargetDecisions,
+  startMiPreflight,
+  type MiDeployment,
+  type MiDeploymentSummary,
+  type MiDeploymentTarget,
+  type DeploymentTiming,
+} from '../api/miDeployments';
 import { LogFilesDrawer } from '../components/LogFilesDrawer';
 
-const terminal = new Set(['COMPLETED', 'COMPLETED_WITH_ISSUES', 'CANCELLED', 'FAILED']);
+const active = new Set(['RUNNING', 'CANCELLING']);
+const preparing = new Set(['DRAFT', 'PREFLIGHT', 'AWAITING_DECISIONS', 'READY']);
+const retryable = new Set(['FAILED', 'FAULTY', 'INDETERMINATE']);
+const labels: Record<string, string> = {
+  AWAITING_DECISIONS: 'Review conflicts',
+  COMPLETED_WITH_ISSUES: 'Completed with issues',
+  SKIPPED_CONFLICT: 'Conflict skipped',
+  SKIPPED_INELIGIBLE: 'Ineligible',
+  VERIFYING_DELETE: 'Verifying removal',
+  VERIFYING_DEPLOY: 'Verifying deployment',
+  INDETERMINATE: 'Needs recheck',
+  STALE_PREFLIGHT: 'Preflight expired',
+};
+const label = (value: string) => labels[value] ?? value.charAt(0) + value.slice(1).toLowerCase();
+const date = (value?: string | null) => (value ? new Date(value).toLocaleString() : 'Not available');
+const card = { border: '1px solid', borderColor: 'divider', borderRadius: 2, p: 2.5, bgcolor: 'background.paper' };
+function duration(value: DeploymentTiming, running = false): string {
+  const ms = value.durationMs ?? (running && value.startedAt ? Date.now() - new Date(value.startedAt).getTime() : null);
+  if (ms == null || !Number.isFinite(ms)) return '\u2014';
+  if (ms < 1000) return `${Math.max(0, ms)} ms`;
+  const seconds = Math.floor(ms / 1000);
+  return seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s` : `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+}
+function Status({ value }: { value: string }): JSX.Element {
+  const success = value === 'SUCCEEDED' || value === 'COMPLETED';
+  const failure = ['FAILED', 'FAULTY'].includes(value);
+  const warning = ['INDETERMINATE', 'COMPLETED_WITH_ISSUES', 'STALE_PREFLIGHT'].includes(value);
+  const running = active.has(value) || ['VALIDATING', 'DELETING', 'UPLOADING', 'VERIFYING_DELETE', 'VERIFYING_DEPLOY'].includes(value);
+  return <Chip size="small" label={label(value)} color={success ? 'success' : failure ? 'error' : warning ? 'warning' : running ? 'info' : 'default'} icon={success ? <CheckCircle2 size={14} /> : failure ? <XCircle size={14} /> : undefined} />;
+}
+function Field({ title, children }: { title: string; children: ReactNode }): JSX.Element {
+  return (
+    <Box sx={{ minWidth: 0 }}>
+      <Typography variant="caption" color="text.secondary">
+        {title}
+      </Typography>
+      <Typography variant="body2" component="div" sx={{ overflowWrap: 'anywhere' }}>
+        {children}
+      </Typography>
+    </Box>
+  );
+}
+function initialStep(operation: MiDeployment) {
+  return operation.status === 'READY' ? 3 : operation.status === 'AWAITING_DECISIONS' ? 2 : 0;
+}
+function numberParam(value: string | null, fallback: number) {
+  const n = Number(value);
+  return value !== null && Number.isInteger(n) && n >= 0 ? n : fallback;
+}
+
 export default function Deployments({ org }: OrgScope): JSX.Element {
   const { hasOrgPermission, isOrgPermissionsLoaded } = useAccessControl();
   const canManage = hasOrgPermission(Permissions.DEPLOYMENT_MANAGE);
-  const [operation, setOperation] = useState<MiDeployment | null>(null);
-  const [history, setHistory] = useState<MiDeployment[]>([]);
-  const [historyPage, setHistoryPage] = useState(0);
-  const [historyRowsPerPage, setHistoryRowsPerPage] = useState(10);
-  const [historyTotal, setHistoryTotal] = useState(0);
-  const [step, setStep] = useState(0);
+  const canView = canManage || hasOrgPermission(Permissions.DEPLOYMENT_VIEW);
+  const [params, setParams] = useSearchParams();
+  const client = useQueryClient();
+  const id = params.get('deploymentId');
+  const isNew = params.get('view') === 'new' && !id;
+  const isHistory = !id && !isNew;
+  const page = numberParam(params.get('page'), 0);
+  const size = [5, 10, 25, 50].includes(numberParam(params.get('size'), 10)) ? numberParam(params.get('size'), 10) : 10;
   const [file, setFile] = useState<File | null>(null);
   const [selectedProjects, setSelectedProjects] = useState<string[]>([]);
   const [projectSearch, setProjectSearch] = useState('');
-  const [productionConfirmation, setProductionConfirmation] = useState('');
-  const [targetDecisions, setTargetDecisions] = useState<Record<string, boolean>>({});
+  const [decisions, setDecisions] = useState<Record<string, boolean>>({});
+  const [confirmation, setConfirmation] = useState('');
   const [busy, setBusy] = useState(false);
-  const [executing, setExecuting] = useState(false);
-  const [autoChecking, setAutoChecking] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [targetFilter, setTargetFilter] = useState('');
-  const [pendingDelete, setPendingDelete] = useState<MiDeployment | null>(null);
-  const autoRecheckAttempts = useRef(0);
+  const [pendingDelete, setPendingDelete] = useState<MiDeploymentSummary | null>(null);
+  const [logRuntime, setLogRuntime] = useState<string | null>(null);
+  const [, tick] = useState(0);
+  const restored = useRef('');
+  const uploadKey = useRef(crypto.randomUUID());
   const { data: projects = [], isLoading: projectsLoading } = useProjects();
-
-  const loadHistory = useCallback(async () => {
-    try {
-      const result = await listMiDeployments(org, historyRowsPerPage, historyPage * historyRowsPerPage);
-      setHistory(Array.from(new Map(result.items.filter((item) => item.id).map((item) => [item.id, item])).values()));
-      setHistoryTotal(result.total);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Unable to load deployment history.');
-    }
-  }, [historyPage, historyRowsPerPage, org]);
+  const history = useQuery({
+    queryKey: ['mi-deployments', org, page, size],
+    queryFn: () => listMiDeployments(org, size, page * size),
+    enabled: canView && isHistory,
+    refetchInterval: (query) => (query.state.data?.items.some((item) => active.has(item.status)) ? 3000 : false),
+  });
+  const detail = useQuery({ queryKey: ['mi-deployment', org, id], queryFn: () => getMiDeployment(id!, org), enabled: canView && !!id, refetchInterval: (query) => (query.state.data && active.has(query.state.data.status) ? 3000 : false) });
+  const operation = detail.data;
+  const editing = !!operation && preparing.has(operation.status) && canManage;
+  const step = operation ? Math.min(numberParam(params.get('step'), initialStep(operation)), operation.status === 'DRAFT' ? 1 : operation.status === 'AWAITING_DECISIONS' ? 2 : 3) : 0;
+  const targetFilter = params.get('targetQuery') ?? '';
+  const targetStatus = params.get('targetStatus') ?? '';
+  const eventTarget = params.get('target');
+  const eventsOpen = params.get('events') === '1';
+  const updateRoute = (changes: Record<string, string | null>, replace = false) => {
+    setParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        Object.entries(changes).forEach(([key, value]) => (value === null ? next.delete(key) : next.set(key, value)));
+        return next;
+      },
+      { replace },
+    );
+  };
+  const openOperation = (deploymentId: string, nextStep?: number) => updateRoute({ deploymentId, view: null, step: nextStep == null ? null : String(nextStep), events: null, target: null });
+  const back = () => {
+    setError(null);
+    updateRoute({ deploymentId: null, view: null, step: null, events: null, target: null });
+  };
   useEffect(() => {
-    if (canManage || hasOrgPermission(Permissions.DEPLOYMENT_VIEW)) void loadHistory();
-  }, [canManage, hasOrgPermission, loadHistory]);
+    if (!operation || restored.current === `${org}:${operation.id}`) return;
+    restored.current = `${org}:${operation.id}`;
+    setSelectedProjects(operation.selectedProjectIds?.length ? operation.selectedProjectIds : [...new Set(operation.targets.map((t) => t.projectId))]);
+    setDecisions(Object.fromEntries(operation.targets.map((t) => [t.targetId, t.deleteBeforeUpload])));
+    setConfirmation('');
+    setError(null);
+  }, [operation, org]);
   useEffect(() => {
-    if (!operation) return;
-    const hasIndeterminate = operation.targets.some((target) => target.phase === 'INDETERMINATE');
-    // Keep observing running operations and unresolved targets. Terminal operations
-    // without indeterminate targets do not need background traffic.
-    if (terminal.has(operation.status) && !hasIndeterminate) return;
-    const timer = window.setInterval(async () => {
-      try {
-        const fresh = await getMiDeployment(operation.id);
-        setOperation(fresh);
-        const unresolved = fresh.targets.some((target) => target.phase === 'INDETERMINATE');
-        if (unresolved && fresh.status === 'COMPLETED_WITH_ISSUES' && autoRecheckAttempts.current < 10) {
-          autoRecheckAttempts.current += 1;
-          setAutoChecking(true);
-          setOperation(await recheckMiDeployment(fresh.id));
-        } else if (unresolved && autoRecheckAttempts.current >= 10) {
-          setAutoChecking(false);
-          window.clearInterval(timer);
-        } else if (!unresolved) {
-          setAutoChecking(false);
-        }
-      } catch {
-        /* polling is best effort; the last known state remains visible */
-      }
-    }, 3000);
+    if (!operation || !active.has(operation.status)) return;
+    const timer = window.setInterval(() => tick((v) => v + 1), 1000);
     return () => window.clearInterval(timer);
-  }, [operation?.id, operation?.status]);
-  useEffect(() => {
-    autoRecheckAttempts.current = 0;
-    setAutoChecking(false);
-  }, [operation?.id]);
-  useEffect(() => {
-    if (operation?.status === 'COMPLETED_WITH_ISSUES' && operation.targets.some((target) => target.phase === 'INDETERMINATE') && autoRecheckAttempts.current < 10) {
-      setAutoChecking(true);
-    }
-  }, [operation?.status, operation?.targets]);
-  useEffect(() => {
-    if (!operation || operation.targets.length === 0) return;
-    const pending = operation.targets.some((target) => ['QUEUED', 'VALIDATING', 'DELETING', 'VERIFYING_DELETE', 'UPLOADING', 'VERIFYING_DEPLOY'].includes(target.phase));
-    const issues = operation.targets.some((target) => ['FAILED', 'FAULTY', 'INDETERMINATE'].includes(target.phase));
-    if (!pending && !issues && (operation.status === 'RUNNING' || operation.status === 'COMPLETED_WITH_ISSUES')) {
-      setOperation({ ...operation, status: 'COMPLETED' });
-    }
-  }, [operation?.status, operation?.targets]);
-  const toggleProject = (id: string) => setSelectedProjects((current) => (current.includes(id) ? current.filter((item) => item !== id) : [...current, id]));
+  }, [operation]);
   const run = async (action: () => Promise<MiDeployment>, nextStep?: number) => {
     setBusy(true);
     setError(null);
     try {
-      setOperation(await action());
-      if (nextStep !== undefined) setStep(nextStep);
+      const result = await action();
+      client.setQueryData(['mi-deployment', org, result.id], result);
+      await client.invalidateQueries({ queryKey: ['mi-deployments', org] });
+      await client.invalidateQueries({ queryKey: ['mi-events', org] });
+      if (result.id !== id || nextStep !== undefined) openOperation(result.id, nextStep);
+      if (result.id !== id) {
+        restored.current = '';
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Deployment request failed.');
     } finally {
       setBusy(false);
     }
   };
-  const cancelAndReset = async () => {
-    if (!operation) {
-      reset();
-      return;
-    }
+  const remove = async () => {
+    if (!pendingDelete) return;
     setBusy(true);
     setError(null);
     try {
-      await cancelMiDeployment(operation.id);
-      reset();
-      await loadHistory();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Unable to cancel deployment.');
-    } finally {
-      setBusy(false);
-    }
-  };
-  const confirmDelete = async () => {
-    if (!pendingDelete) return;
-    setBusy(true);
-    try {
       await deleteMiDeployment(pendingDelete.id);
       setPendingDelete(null);
-      await loadHistory();
+      if (history.data?.items.length === 1 && page > 0) updateRoute({ page: String(page - 1) }, true);
+      await client.invalidateQueries({ queryKey: ['mi-deployments', org] });
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Unable to delete deployment.');
     } finally {
       setBusy(false);
     }
   };
-  const reset = () => {
-    setExecuting(false);
-    setAutoChecking(false);
-    autoRecheckAttempts.current = 0;
-    setOperation(null);
-    setFile(null);
-    setSelectedProjects([]);
-    setProjectSearch('');
-    setProductionConfirmation('');
-    setTargetDecisions({});
-    setStep(0);
-  };
-  const stepForOperation = (item: MiDeployment): number => {
-    if (item.status === 'DRAFT' || item.status === 'PREFLIGHT') return 0;
-    if (item.status === 'AWAITING_DECISIONS') return 2;
-    if (item.status === 'READY') return 3;
-    return 3;
-  };
-  const decisions = useMemo(() => operation?.targets.filter((target) => target.conflict || target.conflictDetected) ?? [], [operation]);
-  const filteredProjects = useMemo(() => {
-    const query = projectSearch.trim().toLowerCase();
-    return projects.filter((project) => !query || `${project.name} ${project.handler}`.toLowerCase().includes(query));
-  }, [projectSearch, projects]);
-  const projectNames = useMemo(() => Object.fromEntries(projects.map((project) => [project.id, project.name])), [projects]);
-  if (isOrgPermissionsLoaded && !hasOrgPermission(Permissions.DEPLOYMENT_VIEW) && !canManage) return <></>;
+  if (isOrgPermissionsLoaded && !canView) return <></>;
+  const shownTargets = (operation?.targets ?? []).filter(
+    (t) => (!targetStatus || t.phase === targetStatus) && (!targetFilter || [t.projectName, t.projectId, t.runtimeName, t.runtimeId, t.environmentName, t.message, t.reason].some((value) => value?.toLowerCase().includes(targetFilter.toLowerCase()))),
+  );
+  const eligibleCount = operation?.targets.filter((t) => t.eligible && (!t.conflictDetected || (decisions[t.targetId] ?? t.deleteBeforeUpload))).length ?? 0;
+  const production = operation?.targets.some((t) => t.production && t.eligible && (!t.conflictDetected || t.deleteBeforeUpload));
+  const showEvents = (targetId?: string) => updateRoute({ events: '1', target: targetId ?? null });
   return (
     <PageContent>
-      <PageTitle>
-        <PageTitle.Header>Deployments</PageTitle.Header>
-      </PageTitle>
+      <Stack direction="row" alignItems="center" justifyContent="space-between" gap={2} sx={{ mb: 2 }}>
+        <PageTitle>
+          <PageTitle.Header>{isHistory ? 'Deployments' : isNew || editing ? 'New deployment' : 'Deployment details'}</PageTitle.Header>
+        </PageTitle>
+        {isHistory && canManage && (
+          <Button
+            variant="contained"
+            startIcon={<Upload size={16} />}
+            sx={{ flexShrink: 0, whiteSpace: "nowrap" }}
+            onClick={() => {
+              setFile(null);
+              uploadKey.current = crypto.randomUUID();
+              updateRoute({ view: 'new' });
+            }}>
+            New deploy
+          </Button>
+        )}
+      </Stack>
       {error && (
-        <Alert severity="error" sx={{ mb: 2 }}>
+        <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>
           {error}
         </Alert>
       )}
-      {!operation && canManage && (
-        <Stack gap={2}>
-          <Box sx={{ border: '1px dashed', borderColor: 'divider', borderRadius: 1, p: 4, textAlign: 'center' }}>
-            <Upload size={28} />
-            <Typography variant="h6" sx={{ mt: 1 }}>
-              Deploy a Carbon Application
-            </Typography>
-            <Typography color="text.secondary">Upload one .CAR to selected projects and their MI runtimes.</Typography>
-            {!file && <Button component="label" variant="contained" sx={{ mt: 2 }} startIcon={<Upload size={16} />}>
-              Choose .CAR
-              <input
-                hidden
-                type="file"
-                accept=".car,application/octet-stream"
-                onChange={(e) => {
-                  const picked = e.target.files?.[0];
-                  if (picked) {
-                    setFile(picked);
-                    setStep(0);
-                  }
-                }}
-              />
-            </Button>}
-            {file && (<>
-              <Box sx={{ mt: 2, mx: 'auto', maxWidth: 620, textAlign: 'left', border: '1px solid', borderColor: 'divider', borderRadius: 2, p: 2, bgcolor: 'background.paper' }}>
-                <Stack direction="row" gap={1.5} alignItems="center"><Box sx={{ width: 44, height: 44, borderRadius: 1.5, display: 'grid', placeItems: 'center', bgcolor: 'action.selected' }}><Upload size={21} /></Box><Box sx={{ minWidth: 0, flex: 1 }}><Typography variant="subtitle1" noWrap>{file.name}</Typography><Typography variant="caption" color="text.secondary">Carbon Application archive</Typography></Box><Chip label="Ready" color="success" size="small" /></Stack>
-                <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr 1fr' }, gap: 1.5, mt: 2 }}><Box><Typography variant="caption" color="text.secondary">Format</Typography><Typography variant="body2">.CAR / ZIP</Typography></Box><Box><Typography variant="caption" color="text.secondary">Size</Typography><Typography variant="body2">{(file.size / 1024 / 1024).toFixed(2)} MB</Typography></Box><Box><Typography variant="caption" color="text.secondary">Modified</Typography><Typography variant="body2">{file.lastModified ? new Date(file.lastModified).toLocaleString() : '—'}</Typography></Box></Box>
-              </Box>
-              <Box sx={{ mt: 2 }}>
-                <Typography variant="body2" sx={{ display: 'none' }}>
-                  {file.name} · {(file.size / 1024 / 1024).toFixed(2)} MB
-                </Typography>
-                <Button variant="contained" sx={{ mt: 1 }} disabled={busy} onClick={() => void run(() => createMiDeployment(org, file, crypto.randomUUID()))}>
-                  Upload and inspect
-                </Button>
-                <Button variant="text" color="inherit" sx={{ mt: 1, ml: 1 }} disabled={busy} onClick={() => setFile(null)}>
-                  Remove file
-                </Button>
-              </Box>
-            </>)}
-          </Box>
-        </Stack>
-      )}
-      {operation && (
-        <Stack gap={2}>
-          <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5} alignItems={{ xs: 'stretch', sm: 'center' }} sx={{ pb: 1.5, borderBottom: '1px solid', borderColor: 'divider' }}>
-            <Chip label={`Step ${Math.min(step + 1, 4)} of 4`} color="primary" />
-            <Typography variant="body2" color="text.secondary">
-              {operation.fileName} · {operation.artifactName} {operation.artifactVersion}
-            </Typography>
-            <Box sx={{ flex: 1 }} />
-            {step < 3 && (
-              <Button variant="outlined" color="inherit" onClick={() => void cancelAndReset()} disabled={busy}>
-                Cancel
-              </Button>
-            )}
-            <Button
-              variant="text"
-              startIcon={<ArrowLeft size={16} />}
-              onClick={() => {
-                reset();
-                void loadHistory();
-              }}
-              disabled={busy}>
-              Back to deployments
+      {((detail.isError && id) || (history.isError && isHistory)) && (
+        <Alert
+          severity="error"
+          sx={{ mb: 2 }}
+          action={
+            <Button color="inherit" onClick={() => void (id ? detail.refetch() : history.refetch())}>
+              Try again
             </Button>
-          </Stack>
-          {step === 0 && (
-            <Box>
-              <Typography variant="h6">1. Confirm artifact</Typography>
-              <Box sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 2, p: 2.5, maxWidth: 760, bgcolor: 'background.paper' }}>
-                <Stack direction="row" gap={1.5} alignItems="center" sx={{ mb: 2 }}>
-                  <Box sx={{ width: 42, height: 42, borderRadius: 1.5, display: 'grid', placeItems: 'center', bgcolor: 'action.selected' }}><Upload size={21} /></Box>
-                  <Box sx={{ minWidth: 0, flex: 1 }}><Typography variant="subtitle1" noWrap>{operation.fileName}</Typography><Typography variant="caption" color="text.secondary">Carbon Application package (.CAR)</Typography></Box>
-                  <Chip label={operation.status} size="small" />
-                </Stack>
-                <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, gap: 1.5 }}>
-                  <Box><Typography variant="caption" color="text.secondary">Application</Typography><Typography variant="body2">{operation.artifactName || 'Not available'}</Typography></Box>
-                  <Box><Typography variant="caption" color="text.secondary">Version</Typography><Typography variant="body2">{operation.artifactVersion || 'Not available'}</Typography></Box>
-                  <Box><Typography variant="caption" color="text.secondary">File size</Typography><Typography variant="body2">{(operation.fileSize / 1024 / 1024).toFixed(2)} MB</Typography></Box>
-                  <Box><Typography variant="caption" color="text.secondary">SHA-256</Typography><Typography variant="body2" sx={{ wordBreak: 'break-all', fontFamily: 'monospace' }}>{operation.sha256 || 'Not available'}</Typography></Box>
-                  <Box><Typography variant="caption" color="text.secondary">Uploaded</Typography><Typography variant="body2">{operation.createdAt ? new Date(operation.createdAt).toLocaleString() : 'Not available'}</Typography></Box>
+          }>
+          {id ? 'Unable to refresh deployment details. Any displayed data is the last saved response.' : 'Unable to load deployment history.'}
+        </Alert>
+      )}
+      {!isHistory && (
+        <Button startIcon={<ArrowLeft size={16} />} onClick={back} sx={{ mb: 2 }}>
+          Back to deployments
+        </Button>
+      )}
+      {isHistory && (
+        <Stack gap={2}>
+          <Typography color="text.secondary">Review deployments across projects and runtimes. Execution results and events remain available when you return.</Typography>
+          {!canManage && <Alert severity="info">You have view-only access to deployment history.</Alert>}
+          {history.isLoading ? (
+            <CircularProgress aria-label="Loading deployment history" />
+          ) : history.data?.items.length === 0 ? (
+            <Box sx={{ ...card, textAlign: 'center', py: 6 }}>
+              <Typography variant="h6">No deployments yet</Typography>
+              <Typography color="text.secondary">Your deployment history will appear here.</Typography>
+            </Box>
+          ) : (
+            history.data && (
+              <Box sx={{ ...card, p: 0, overflow: 'hidden' }}>
+                <Box sx={{ overflowX: 'auto' }}>
+                  <ListingTable>
+                    <ListingTable.Head>
+                      <ListingTable.Row>
+                        {['Application / version', 'Created by', 'Started', 'Duration', 'Result', 'Runtimes', ...(canManage ? ['Actions'] : [])].map((title) => (
+                          <ListingTable.Cell key={title}>{title}</ListingTable.Cell>
+                        ))}
+                      </ListingTable.Row>
+                    </ListingTable.Head>
+                    <ListingTable.Body>
+                      {history.data.items.map((item) => (
+                        <ListingTable.Row key={item.id}>
+                          <ListingTable.Cell>
+                            <Button sx={{ textTransform: 'none', textAlign: 'left', p: 0 }} onClick={() => openOperation(item.id)}>
+                              {item.artifactName}
+                            </Button>
+                            <Typography variant="caption" display="block" color="text.secondary">
+                              {item.artifactVersion}
+                              {item.parentDeploymentId ? '\u00b7 Retry' : ''}
+                            </Typography>
+                          </ListingTable.Cell>
+                          <ListingTable.Cell>
+                            <Typography variant="body2" sx={{ maxWidth: 160, overflowWrap: 'anywhere' }}>
+                              {item.createdBy}
+                            </Typography>
+                          </ListingTable.Cell>
+                          <ListingTable.Cell>{item.startedAt ? date(item.startedAt) : preparing.has(item.status) ? 'Not started' : 'Not available'}</ListingTable.Cell>
+                          <ListingTable.Cell>{duration(item, active.has(item.status))}</ListingTable.Cell>
+                          <ListingTable.Cell>
+                            <Status value={item.status} />
+                          </ListingTable.Cell>
+                          <ListingTable.Cell>
+                            <Typography variant="body2">
+                              {item.summary.succeeded} / {item.summary.total} succeeded
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              {item.summary.failed + item.summary.indeterminate} issues / {item.summary.skipped} skipped / {item.summary.cancelled} cancelled
+                            </Typography>
+                          </ListingTable.Cell>
+                          {canManage && (
+                            <ListingTable.Cell>
+                              <Tooltip title={active.has(item.status) ? 'Wait for execution to finish before deleting' : 'Delete deployment record'}>
+                                <span>
+                                  <IconButton color="error" size="small" aria-label={`Delete ${item.artifactName} ${item.artifactVersion}`} disabled={active.has(item.status)} onClick={() => setPendingDelete(item)}>
+                                    <Trash2 size={16} />
+                                  </IconButton>
+                                </span>
+                              </Tooltip>
+                            </ListingTable.Cell>
+                          )}
+                        </ListingTable.Row>
+                      ))}
+                    </ListingTable.Body>
+                  </ListingTable>
                 </Box>
+                <TablePagination
+                  component="div"
+                  count={history.data.total}
+                  page={page}
+                  rowsPerPage={size}
+                  rowsPerPageOptions={[5, 10, 25, 50]}
+                  onPageChange={(_, value) => updateRoute({ page: String(value) })}
+                  onRowsPerPageChange={(e) => updateRoute({ size: e.target.value, page: '0' })}
+                />
               </Box>
-              <Button sx={{ mt: 2 }} variant="contained" disabled={busy} onClick={() => setStep(1)}>
-                Continue to projects
-              </Button>
-            </Box>
-          )}
-          {step === 1 && (
-            <Box>
-              <Typography variant="h6">2. Select projects</Typography>
-              <Typography color="text.secondary" sx={{ mb: 1 }}>
-                {selectedProjects.length} of {projects.length} projects selected
-              </Typography>
-              <TextField fullWidth size="small" placeholder="Search projects by name or handler" value={projectSearch} onChange={(event) => setProjectSearch(event.target.value)} sx={{ mb: 1.5 }} />
-              {projectsLoading ? (
-                <CircularProgress />
-              ) : (
-                <Stack gap={1.25} sx={{ maxHeight: 360, overflowY: 'auto', pr: 0.5, py: 0.5 }}>
-                  {filteredProjects.map((project) => (
-                    <Box key={project.id} sx={{ border: '1px solid', borderColor: selectedProjects.includes(project.id) ? 'primary.main' : 'divider', borderRadius: 1.5, px: 1.5, py: 1.1, bgcolor: selectedProjects.includes(project.id) ? 'action.selected' : 'transparent' }}>
-                      <FormControlLabel sx={{ width: '100%', m: 0, alignItems: 'flex-start' }} control={<Checkbox sx={{ mt: -0.5 }} checked={selectedProjects.includes(project.id)} onChange={() => toggleProject(project.id)} />} label={<Box sx={{ minWidth: 0 }}>
-                        <Stack direction="row" gap={1} alignItems="center" flexWrap="wrap">
-                          <Typography variant="body2" fontWeight={600}>{project.name}</Typography>
-                          {project.type && <Chip size="small" variant="outlined" label={project.type} />}
-                        </Stack>
-                        <Typography variant="caption" color="text.secondary" display="block">{project.handler}{project.region ? ` · ${project.region}` : ''}</Typography>
-                        <Typography variant="body2" color="text.secondary" sx={{ mt: 0.6 }}>{project.description || 'No description provided.'}</Typography>
-                      </Box>} />
-                    </Box>
-                  ))}
-                  {filteredProjects.length === 0 && <Typography color="text.secondary" sx={{ py: 2, textAlign: 'center' }}>No projects match your search.</Typography>}
-                </Stack>
-              )}
-              <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
-                <Button variant="text" color="inherit" onClick={() => setStep(0)} disabled={busy} sx={{ mr: 1 }}>
-                  Back
-                </Button>
-                <Button variant="contained" disabled={busy || selectedProjects.length === 0} onClick={() => void run(() => startMiPreflight(operation.id, selectedProjects), 2)}>
-                  Run preflight
-                </Button>
-              </Stack>
-            </Box>
-          )}
-          {step === 2 && (
-            <Box>
-              <Typography variant="h6">3. Review preflight</Typography>
-              <Typography color="text.secondary" sx={{ mb: 2 }}>
-                Conflicts are decided per runtime. Offline and unauthorized targets remain visible as ineligible.
-              </Typography>
-              <TargetTable
-                operation={operation}
-                projectNames={projectNames}
-                conflictDecisions={targetDecisions}
-                onConflictDecision={(targetId, deleteBeforeUpload) => setTargetDecisions((current) => ({ ...current, [targetId]: deleteBeforeUpload }))}
-              />
-              <Button
-                variant="contained"
-                disabled={busy || operation.targets.every((target) => target.eligible === false)}
-                onClick={() =>
-                  void run(
-                    () =>
-                      saveMiTargetDecisions(
-                        operation.id,
-                        decisions.map((target) => {
-                          const targetId = target.targetId || target.id || '';
-                          return { targetId, deleteBeforeUpload: targetDecisions[targetId] ?? target.deleteBeforeUpload ?? false };
-                        }),
-                      ),
-                    3,
-                  )
-                }
-                sx={{ mt: 2 }}>
-                Continue
-              </Button>
-              <Button variant="text" color="inherit" onClick={() => setStep(1)} disabled={busy} sx={{ mt: 2, ml: 1 }}>
-                Back
-              </Button>
-            </Box>
-          )}
-          {step === 3 && (
-            <Box>
-              <Typography variant="h6">4. Execute deployment</Typography>
-              <Alert severity="warning" sx={{ my: 2 }}>
-                The operation continues on the server after you leave this page. Failed and indeterminate targets can be retried later.
-              </Alert>
-              {operation.targets.some((target) => target.environmentName?.toLowerCase().includes('prod')) && (
-                <TextField label={`Type DEPLOY ${operation.artifactName}:${operation.artifactVersion}`} value={productionConfirmation} onChange={(e) => setProductionConfirmation(e.target.value)} fullWidth sx={{ mb: 2 }} />
-              )}
-              {operation.status === 'READY' && !executing && (
-                <Button
-                  variant="contained"
-                  disabled={busy}
-                  onClick={() => {
-                    setExecuting(true);
-                    setOperation((current) => current ? {
-                      ...current,
-                      status: 'RUNNING',
-                      targets: current.targets.map((target) => target.eligible && target.phase === 'QUEUED' ? { ...target, phase: 'VALIDATING', message: 'Checking runtime before deployment…' } : target),
-                    } : current);
-                    void run(() => executeMiDeployment(operation.id, productionConfirmation), 3).finally(() => setExecuting(false));
-                  }}>
-                  Start deployment
-                </Button>
-              )}
-              {operation.status === 'READY' && !executing && (
-                <Button variant="text" color="inherit" onClick={() => setStep(2)} disabled={busy} sx={{ mt: 2, ml: 1 }}>
-                  Back
-                </Button>
-              )}
-            </Box>
-          )}
-          {(executing || (autoChecking && operation.targets.some((target) => target.phase === 'INDETERMINATE')) || operation.status === 'RUNNING' || operation.status.startsWith('COMPLETED') || operation.status === 'CANCELLED' || operation.status === 'FAILED') && (
-            <Box>
-              <Divider sx={{ my: 2 }} />
-            <Stack direction="row" gap={1} alignItems="center" flexWrap="wrap" sx={{ mb: 1 }}>
-              <Typography variant="h6">Execution</Typography>
-              <Chip label={executing || (autoChecking && operation.targets.some((target) => target.phase === 'INDETERMINATE')) ? 'RUNNING' : operation.status} color={executing || (autoChecking && operation.targets.some((target) => target.phase === 'INDETERMINATE')) ? 'info' : undefined} />
-              {(['SUCCEEDED', 'FAILED', 'FAULTY', 'INDETERMINATE', 'SKIPPED_CONFLICT', 'SKIPPED_INELIGIBLE'] as const).map((phase) => {
-                const count = operation.targets.filter((target) => target.phase === phase).length;
-                return count > 0 && !(autoChecking && operation.targets.some((target) => target.phase === 'INDETERMINATE')) ? <Chip key={phase} size="small" label={`${phase}: ${count}`} /> : null;
-              })}
-            </Stack>
-            {(executing || (autoChecking && operation.targets.some((target) => target.phase === 'INDETERMINATE')) || operation.status === 'RUNNING') && (
-              <>
-                <Typography variant="body2" color="text.secondary" sx={{ mb: 0.75 }}>
-                  {executing ? 'Deploying and checking each MI runtime…' : autoChecking && operation.targets.some((target) => target.phase === 'INDETERMINATE') ? 'Rechecking runtime status…' : 'Deployment is running in the background…'}
-                </Typography>
-                <LinearProgress sx={{ borderRadius: 1, mb: 1.5 }} />
-              </>
-            )}
-            {!executing && operation.targets.some((target) => target.phase === 'INDETERMINATE') && (
-              <Stack direction="row" gap={1} alignItems="center" sx={{ mb: 1.5 }}>
-                <CircularProgress size={15} />
-                <Typography variant="body2" color="text.secondary">Checking runtime status automatically…</Typography>
-              </Stack>
-            )}
-              <TextField size="small" label="Filter targets" value={targetFilter} onChange={(event) => setTargetFilter(event.target.value)} sx={{ mb: 1, minWidth: 260 }} />
-            <TargetTable
-              operation={operation}
-              filter={targetFilter}
-              projectNames={projectNames}
-              busy={busy}
-              onRecheck={(targetId) => void run(() => recheckMiDeployment(operation.id, targetId))}
-              onCancel={(targetId) => void run(() => cancelMiDeployment(operation.id, targetId))}
-              onRetry={(targetId) => void run(() => retryMiDeployment(operation.id, [targetId]), 3)}
-            />
-            </Box>
+            )
           )}
         </Stack>
       )}
-      {!operation && !canManage && <Alert severity="info">You have view-only access to deployment history.</Alert>}
-      {!operation && history.length > 0 && (
-        <Box sx={{ mt: 4 }}>
-          <Typography variant="h6" sx={{ mb: 1 }}>
-            Recent deployments
+      {id && detail.isLoading && <CircularProgress aria-label="Loading deployment details" />}
+      {isNew && canManage && (
+        <Box sx={{ ...card, borderStyle: 'dashed', textAlign: 'center', py: 5 }}>
+          <Upload size={32} />
+          <Typography variant="h6" sx={{ mt: 1 }}>
+            Deploy a Carbon Application
           </Typography>
-          <ListingTable>
-            <ListingTable.Head><ListingTable.Row><ListingTable.Cell>Application</ListingTable.Cell><ListingTable.Cell>Version</ListingTable.Cell><ListingTable.Cell>Executed</ListingTable.Cell><ListingTable.Cell>Status</ListingTable.Cell><ListingTable.Cell>Actions</ListingTable.Cell></ListingTable.Row></ListingTable.Head>
-            <ListingTable.Body>{history.map((item) => <ListingTable.Row key={item.id}><ListingTable.Cell><Button variant="text" sx={{ textTransform: 'none', p: 0 }} onClick={() => { setOperation(item); setStep(stepForOperation(item)); }}>{item.artifactName}</Button></ListingTable.Cell><ListingTable.Cell>{item.artifactVersion}</ListingTable.Cell><ListingTable.Cell>{item.updatedAt ? new Date(item.updatedAt).toLocaleString() : '—'}</ListingTable.Cell><ListingTable.Cell><Chip size="small" label={item.status} /></ListingTable.Cell><ListingTable.Cell><Tooltip title="Delete deployment"><IconButton size="small" color="error" aria-label={`Delete ${item.artifactName}`} onClick={() => setPendingDelete(item)}><Trash2 size={16} /></IconButton></Tooltip></ListingTable.Cell></ListingTable.Row>)}</ListingTable.Body>
-          </ListingTable>
-          <TablePagination component="div" count={historyTotal} page={historyPage} onPageChange={(_, value) => setHistoryPage(value)} rowsPerPage={historyRowsPerPage} onRowsPerPageChange={(event) => { setHistoryRowsPerPage(Number(event.target.value)); setHistoryPage(0); }} rowsPerPageOptions={[5, 10, 25, 50]} />
+          <Typography color="text.secondary" sx={{ mb: 3 }}>
+            Choose one .CAR, then select projects and review their runtimes.
+          </Typography>
+          <Button component="label" variant={file ? 'outlined' : 'contained'}>
+            Choose .CAR
+            <input
+              hidden
+              type="file"
+              accept=".car"
+              onChange={(e) => {
+                setFile(e.target.files?.[0] ?? null);
+                uploadKey.current = crypto.randomUUID();
+              }}
+            />
+          </Button>
+          {file && (
+            <Stack gap={2} alignItems="center" sx={{ mt: 2 }}>
+              <Typography>
+                {file.name} / {(file.size / 1024 / 1024).toFixed(2)} MB
+              </Typography>
+              <Button variant="contained" disabled={busy} onClick={() => void run(() => createMiDeployment(org, file, uploadKey.current), 0)}>
+                {busy ? 'Uploading...' : 'Upload and inspect'}
+              </Button>
+            </Stack>
+          )}
         </Box>
       )}
-    <Dialog open={pendingDelete !== null} onClose={() => !busy && setPendingDelete(null)} maxWidth="sm" fullWidth>
-      <DialogTitle>Delete deployment record?</DialogTitle>
-      <DialogContent>
-        <Typography> This will permanently remove the deployment history, targets and stored artifact for <strong>{pendingDelete?.artifactName} {pendingDelete?.artifactVersion}</strong>. This action cannot be undone.</Typography>
-      </DialogContent>
-      <DialogActions>
-        <Button onClick={() => setPendingDelete(null)} disabled={busy}>Cancel</Button>
-        <Button variant="contained" color="error" startIcon={<Trash2 size={16} />} onClick={() => void confirmDelete()} disabled={busy}>Delete record</Button>
-      </DialogActions>
-    </Dialog>
+      {operation && (
+        <Stack gap={2.5}>
+          <Box sx={card}>
+            <Stack direction={{ xs: 'column', sm: 'row' }} gap={2} alignItems={{ sm: 'center' }} justifyContent="space-between">
+              <Box>
+                <Typography variant="h6">
+                  {operation.artifactName}{' '}
+                  <Typography component="span" color="text.secondary">
+                    {operation.artifactVersion}
+                  </Typography>
+                </Typography>
+                <Typography variant="body2" color="text.secondary" sx={{ overflowWrap: 'anywhere' }}>
+                  {operation.fileName}
+                </Typography>
+              </Box>
+              <Status value={operation.status} />
+            </Stack>
+            <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr 1fr', md: 'repeat(4, 1fr)' }, gap: 2, mt: 2 }}>
+              <Field title="Created by">{operation.createdBy}</Field>
+              <Field title="Started">{date(operation.startedAt)}</Field>
+              <Field title="Finished">{date(operation.finishedAt)}</Field>
+              <Field title="Duration">{duration(operation, active.has(operation.status))}</Field>
+            </Box>
+            {operation.parentDeploymentId && (
+              <Button size="small" sx={{ mt: 1 }} onClick={() => openOperation(operation.parentDeploymentId!)}>
+                View original deployment
+              </Button>
+            )}
+          </Box>
+          {operation.executionError && (
+            <Alert severity="error">
+              {operation.executionError}
+              {canManage && (
+                <Button color="inherit" disabled={busy} onClick={() => void run(() => recheckMiDeployment(operation.id))}>
+                  Recheck interrupted execution
+                </Button>
+              )}
+            </Alert>
+          )}
+          {editing && (
+            <Box sx={card}>
+              <Stepper activeStep={step} alternativeLabel sx={{ mb: 3 }}>
+                {['Artifact', 'Projects', 'Conflicts', 'Review'].map((title) => (
+                  <Step key={title}>
+                    <StepLabel>{title}</StepLabel>
+                  </Step>
+                ))}
+              </Stepper>
+              {step === 0 && (
+                <Stack gap={2}>
+                  <Typography variant="h6">Confirm artifact</Typography>
+                  <Field title="File size">{(operation.fileSize / 1024 / 1024).toFixed(2)} MB</Field>
+                  <Field title="SHA-256">{operation.sha256}</Field>
+                  <Field title="Uploaded">{date(operation.createdAt)}</Field>
+                  <Box>
+                    <Button variant="contained" onClick={() => updateRoute({ step: '1' })}>
+                      Continue to projects
+                    </Button>
+                  </Box>
+                </Stack>
+              )}
+              {step === 1 && (
+                <Stack gap={2}>
+                  <Typography variant="h6">Select projects</Typography>
+                  <Typography color="text.secondary">{selectedProjects.length} projects selected. All registered MI runtimes in these projects will be inspected.</Typography>
+                  <TextField size="small" label="Search projects" value={projectSearch} onChange={(e) => setProjectSearch(e.target.value)} />
+                  {projectsLoading ? (
+                    <CircularProgress />
+                  ) : (
+                    <Stack gap={1} sx={{ maxHeight: 360, overflowY: 'auto' }}>
+                      {projects
+                        .filter((p) => `${p.name} ${p.handler}`.toLowerCase().includes(projectSearch.toLowerCase()))
+                        .map((project) => (
+                          <Box key={project.id} sx={{ ...card, p: 1, borderColor: selectedProjects.includes(project.id) ? 'primary.main' : 'divider' }}>
+                            <FormControlLabel
+                              sx={{ m: 0, width: '100%' }}
+                              control={<Checkbox checked={selectedProjects.includes(project.id)} onChange={() => setSelectedProjects((current) => (current.includes(project.id) ? current.filter((id) => id !== project.id) : [...current, project.id]))} />}
+                              label={
+                                <Box>
+                                  <Typography variant="body2" fontWeight={600}>
+                                    {project.name}
+                                  </Typography>
+                                  <Typography variant="caption" color="text.secondary">
+                                    {project.handler}
+                                  </Typography>
+                                </Box>
+                              }
+                            />
+                          </Box>
+                        ))}
+                    </Stack>
+                  )}
+                  <Stack direction="row" justifyContent="space-between">
+                    <Button disabled={busy} onClick={() => updateRoute({ step: '0' })}>
+                      Back
+                    </Button>
+                    <Button variant="contained" disabled={busy || !selectedProjects.length} onClick={() => void run(() => startMiPreflight(operation.id, selectedProjects), 2)}>
+                      {busy ? 'Inspecting runtimes...' : 'Run preflight'}
+                    </Button>
+                  </Stack>
+                </Stack>
+              )}
+              {step === 2 && (
+                <Stack gap={2}>
+                  <Typography variant="h6">Review runtime conflicts</Typography>
+                  <Typography color="text.secondary">Choose whether to replace an existing application or skip that runtime. Offline runtimes remain recorded as ineligible.</Typography>
+                  {operation.targets.length === 0 && <Alert severity="info">No MI runtimes were found in the selected projects. Go back and select another project.</Alert>}
+                  <Targets targets={operation.targets} busy={busy} decisions={decisions} onDecision={(id, replace) => setDecisions((current) => ({ ...current, [id]: replace }))} onDetails={showEvents} onLogs={setLogRuntime} />
+                  <Typography variant="body2">{eligibleCount} runtimes selected for execution.</Typography>
+                  <Stack direction="row" justifyContent="space-between">
+                    <Button disabled={busy} onClick={() => updateRoute({ step: '1' })}>
+                      Back
+                    </Button>
+                    <Button
+                      variant="contained"
+                      disabled={busy || eligibleCount === 0}
+                      onClick={() =>
+                        void run(
+                          () =>
+                            saveMiTargetDecisions(
+                              operation.id,
+                              operation.targets.filter((t) => t.conflictDetected).map((t) => ({ targetId: t.targetId, deleteBeforeUpload: decisions[t.targetId] ?? t.deleteBeforeUpload })),
+                            ),
+                          3,
+                        )
+                      }>
+                      Continue to review
+                    </Button>
+                  </Stack>
+                </Stack>
+              )}
+              {step === 3 && (
+                <Stack gap={2}>
+                  <Typography variant="h6">Ready to deploy</Typography>
+                  <Typography>
+                    {operation.targets.filter((t) => t.eligible && (!t.conflictDetected || t.deleteBeforeUpload)).length} runtimes across {new Set(operation.targets.map((t) => t.projectId)).size} projects.
+                  </Typography>
+                  <Alert severity="info">Execution continues on the server when you leave this page. Return to this deployment to review progress and results.</Alert>
+                  {production && (
+                    <>
+                      <Alert severity="warning">This deployment includes production runtimes.</Alert>
+                      <TextField fullWidth label={`Type DEPLOY ${operation.artifactName}:${operation.artifactVersion}`} value={confirmation} onChange={(e) => setConfirmation(e.target.value)} />
+                    </>
+                  )}
+                  <Stack direction="row" justifyContent="space-between">
+                    <Button disabled={busy} onClick={() => updateRoute({ step: '2' })}>
+                      Back
+                    </Button>
+                    <Button variant="contained" disabled={busy || (!!production && confirmation !== `DEPLOY ${operation.artifactName}:${operation.artifactVersion}`)} onClick={() => void run(() => executeMiDeployment(operation.id, confirmation))}>
+                      {busy ? 'Starting...' : 'Start deployment'}
+                    </Button>
+                  </Stack>
+                </Stack>
+              )}
+              <Divider sx={{ my: 2 }} />
+              <Button color="inherit" disabled={busy} onClick={() => void run(() => cancelMiDeployment(operation.id))}>
+                Cancel preparation
+              </Button>
+            </Box>
+          )}
+          {!editing && (
+            <Stack gap={2}>
+              {active.has(operation.status) && (
+                <>
+                  <Alert severity="info">{operation.status === 'CANCELLING' ? 'Cancellation requested. In-flight runtime requests are finishing.' : 'Deployment is running on the server. You can leave and return to this page.'}</Alert>
+                  <LinearProgress aria-label="Deployment in progress" />
+                </>
+              )}
+              <Stack direction="row" gap={1} flexWrap="wrap" alignItems="center">
+                <Typography variant="h6" sx={{ mr: 1 }}>
+                  Runtime executions
+                </Typography>
+                {Object.entries(operation.summary)
+                  .filter(([name]) => name !== 'total')
+                  .map(([name, count]) => (
+                    <Chip key={name} size="small" variant="outlined" label={`${count} ${name}`} />
+                  ))}
+              </Stack>
+              <Stack direction={{ xs: 'column', sm: 'row' }} gap={1}>
+                <TextField size="small" label="Filter projects or runtimes" value={targetFilter} onChange={(e) => updateRoute({ targetQuery: e.target.value || null }, true)} sx={{ flex: 1 }} />
+                <TextField select size="small" label="Status" value={targetStatus} onChange={(e) => updateRoute({ targetStatus: e.target.value || null }, true)} sx={{ minWidth: 190 }}>
+                  <MenuItem value="">All statuses</MenuItem>
+                  {[...new Set(operation.targets.map((t) => t.phase))].map((phase) => (
+                    <MenuItem key={phase} value={phase}>
+                      {label(phase)}
+                    </MenuItem>
+                  ))}
+                </TextField>
+                <Button startIcon={<FileText size={16} />} onClick={() => showEvents()}>
+                  All events
+                </Button>
+                <Button startIcon={<RefreshCw size={16} />} disabled={detail.isFetching} onClick={() => void detail.refetch()}>
+                  Refresh
+                </Button>
+                {canManage && operation.status === 'RUNNING' && (
+                  <Button color="inherit" disabled={busy} onClick={() => void run(() => cancelMiDeployment(operation.id))}>
+                    Cancel pending
+                  </Button>
+                )}
+              </Stack>
+              <Targets
+                targets={shownTargets}
+                busy={busy}
+                onDetails={showEvents}
+                onLogs={setLogRuntime}
+                onRecheck={canManage && !active.has(operation.status) ? (targetId) => void run(() => recheckMiDeployment(operation.id, targetId)) : undefined}
+                onRetry={canManage && !active.has(operation.status) ? (targetId) => void run(() => retryMiDeployment(operation.id, [targetId]), 3) : undefined}
+                onCancel={canManage && active.has(operation.status) ? (targetId) => void run(() => cancelMiDeployment(operation.id, targetId)) : undefined}
+              />
+              {shownTargets.length === 0 && <Alert severity="info">{operation.targets.length ? 'No executions match these filters.' : 'No runtime executions were recorded for this deployment.'}</Alert>}
+            </Stack>
+          )}
+        </Stack>
+      )}
+      {operation && eventsOpen && <EventsDrawer key={`${operation.id}:${eventTarget ?? 'all'}`} org={org} operation={operation} targetId={eventTarget ?? undefined} onClose={() => updateRoute({ events: null, target: null })} />}
+      {logRuntime && <LogFilesDrawer runtimeId={logRuntime} onClose={() => setLogRuntime(null)} />}
+      <Dialog open={!!pendingDelete} onClose={() => !busy && setPendingDelete(null)} maxWidth="sm" fullWidth>
+        <DialogTitle>Delete deployment record?</DialogTitle>
+        <DialogContent>
+          <Typography>
+            This permanently removes the history, runtime executions and events for {pendingDelete?.artifactName} {pendingDelete?.artifactVersion}. Shared artifacts used by other attempts are preserved.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button disabled={busy} onClick={() => setPendingDelete(null)}>
+            Cancel
+          </Button>
+          <Button variant="contained" color="error" disabled={busy} onClick={() => void remove()}>
+            Delete record
+          </Button>
+        </DialogActions>
+      </Dialog>
     </PageContent>
   );
 }
-function TargetTable({ operation, filter = '', projectNames = {}, busy = false, onRecheck, onCancel, onRetry, conflictDecisions, onConflictDecision }: { operation: MiDeployment; filter?: string; projectNames?: Record<string, string>; busy?: boolean; onRecheck?: (targetId: string) => void; onCancel?: (targetId: string) => void; onRetry?: (targetId: string) => void; conflictDecisions?: Record<string, boolean>; onConflictDecision?: (targetId: string, deleteBeforeUpload: boolean) => void }): JSX.Element {
-  const [logRuntimeId, setLogRuntimeId] = useState<string | null>(null);
-  const normalizedFilter = filter.trim().toLowerCase();
-  const targets = operation.targets.filter((target) => !normalizedFilter || [target.projectName, target.projectId, target.environmentName, target.runtimeName, target.phase, target.message, target.reason].filter(Boolean).some((value) => value!.toLowerCase().includes(normalizedFilter)));
+
+type TargetsProps = {
+  targets: MiDeploymentTarget[];
+  busy: boolean;
+  onDetails: (id: string) => void;
+  onLogs: (id: string) => void;
+  decisions?: Record<string, boolean>;
+  onDecision?: (id: string, replace: boolean) => void;
+  onRecheck?: (id: string) => void;
+  onRetry?: (id: string) => void;
+  onCancel?: (id: string) => void;
+};
+function Targets({ targets, busy, onDetails, onLogs, decisions, onDecision, onRecheck, onRetry, onCancel }: TargetsProps): JSX.Element {
+  const actions = targets.some(t => (onDecision && t.conflictDetected) || (onRecheck && t.phase === 'INDETERMINATE') || (onRetry && retryable.has(t.phase)) || (onCancel && t.phase === 'QUEUED'));
   return (
-    <>
-    <ListingTable>
-      <ListingTable.Head>
-        <ListingTable.Row>
-          <ListingTable.Cell>Project</ListingTable.Cell>
-          <ListingTable.Cell>Environment</ListingTable.Cell>
-          <ListingTable.Cell>Runtime</ListingTable.Cell>
-          <ListingTable.Cell>Status</ListingTable.Cell>
-          <ListingTable.Cell>Details</ListingTable.Cell>
-          <ListingTable.Cell>Logs</ListingTable.Cell>
-          {(onRecheck || onCancel || onRetry || onConflictDecision) && <ListingTable.Cell>Actions</ListingTable.Cell>}
-        </ListingTable.Row>
-      </ListingTable.Head>
-      <ListingTable.Body>
-        {targets.map((target, index) => (
-          <ListingTable.Row key={target.targetId || target.id || `${target.runtimeId}-${index}`}>
-            <ListingTable.Cell>{target.projectName && target.projectName !== target.projectId ? target.projectName : projectNames[target.projectId] || target.projectName || target.projectId}</ListingTable.Cell>
-            <ListingTable.Cell>{target.environmentName || '—'}</ListingTable.Cell>
-            <ListingTable.Cell>{target.runtimeName || target.runtimeId}</ListingTable.Cell>
-            <ListingTable.Cell>{['SUCCEEDED'].includes(target.phase) ? <Stack direction="row" gap={0.5} alignItems="center"><CheckCircle2 color="green" size={16} /><Typography variant="caption" color="success.main">Succeeded</Typography></Stack> : ['FAILED', 'FAULTY'].includes(target.phase) ? <Stack direction="row" gap={0.5} alignItems="center"><XCircle color="red" size={16} /><Typography variant="caption" color="error.main">{target.phase}</Typography></Stack> : ['VALIDATING', 'DELETING', 'VERIFYING_DELETE', 'UPLOADING', 'VERIFYING_DEPLOY'].includes(target.phase) ? <Stack direction="row" gap={0.75} alignItems="center"><CircularProgress size={14} /><Chip size="small" color="info" label={target.phase} /></Stack> : <Chip size="small" color={target.phase === 'QUEUED' ? 'success' : undefined} label={target.phase} />}</ListingTable.Cell>
-            <ListingTable.Cell>{target.message || target.reason || (target.conflict || target.conflictDetected ? 'Same name/version exists' : '—')}</ListingTable.Cell>
-            <ListingTable.Cell>
-              <Tooltip title="View runtime logs">
-                <IconButton size="small" aria-label={`View logs for ${target.runtimeName || target.runtimeId}`} disabled={!target.runtimeId} onClick={() => setLogRuntimeId(target.runtimeId)}>
-                  <FileText size={16} />
-                </IconButton>
-              </Tooltip>
-            </ListingTable.Cell>
-            {(onRecheck || onCancel || onRetry || onConflictDecision) && <ListingTable.Cell>
-              <Stack direction="row" gap={0.5} flexWrap="wrap">
-                {onConflictDecision && (target.conflict || target.conflictDetected) && (() => {
-                  const targetId = target.targetId || target.id || '';
-                  const deleteBeforeUpload = conflictDecisions?.[targetId] ?? target.deleteBeforeUpload ?? false;
-                  return <>
-                    <Button size="small" variant={deleteBeforeUpload ? 'contained' : 'text'} onClick={() => onConflictDecision(targetId, true)} disabled={busy}>Delete conflict</Button>
-                    <Button size="small" variant={!deleteBeforeUpload ? 'contained' : 'text'} color="inherit" onClick={() => onConflictDecision(targetId, false)} disabled={busy}>Skip conflict</Button>
-                  </>;
-                })()}
-                {onRecheck && <Button size="small" variant="text" startIcon={<RefreshCw size={14} />} onClick={() => onRecheck(target.targetId || target.id || '')} disabled={busy || target.phase !== 'INDETERMINATE'}>Recheck</Button>}
-                {onCancel && <Button size="small" variant="text" color="inherit" onClick={() => onCancel(target.targetId || target.id || '')} disabled={busy || target.phase !== 'QUEUED'}>Cancel</Button>}
-                {onRetry && <Button size="small" variant="text" startIcon={<RefreshCw size={14} />} onClick={() => onRetry(target.targetId || target.id || '')} disabled={busy || !['FAILED', 'FAULTY'].includes(target.phase)}>Retry</Button>}
-              </Stack>
-            </ListingTable.Cell>}
+    <Box sx={{ ...card, p: 0, overflowX: 'auto' }}>
+      <ListingTable>
+        <ListingTable.Head>
+          <ListingTable.Row>
+            {['Project / component', 'Environment', 'Runtime', 'Status', 'Duration', 'Details', ...(actions ? ['Actions'] : [])].map((title) => (
+              <ListingTable.Cell key={title}>{title}</ListingTable.Cell>
+            ))}
           </ListingTable.Row>
+        </ListingTable.Head>
+        <ListingTable.Body>
+          {targets.map((t) => (
+            <ListingTable.Row key={t.targetId}>
+              <ListingTable.Cell>
+                {t.projectName || 'Name not recorded'}
+                <Typography variant="caption" display="block" color="text.secondary">
+                  {t.componentName || t.componentId}
+                </Typography>
+              </ListingTable.Cell>
+              <ListingTable.Cell>{t.environmentName || 'Name not recorded'}</ListingTable.Cell>
+              <ListingTable.Cell>{t.runtimeName || t.runtimeId}</ListingTable.Cell>
+              <ListingTable.Cell>
+                <Status value={t.phase} />
+              </ListingTable.Cell>
+              <ListingTable.Cell>{duration(t, ['VALIDATING', 'DELETING', 'VERIFYING_DELETE', 'UPLOADING', 'VERIFYING_DEPLOY'].includes(t.phase))}</ListingTable.Cell>
+              <ListingTable.Cell>
+                <Typography variant="body2" sx={{ maxWidth: 260, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', overflowWrap: 'anywhere' }}>
+                  {t.message || t.reason || '\u2014'}
+                </Typography>
+                <Stack direction="row" gap={1}>
+                  <Button size="small" sx={{ p: 0 }} onClick={() => onDetails(t.targetId)}>
+                    View details
+                  </Button>
+                  <Tooltip title="Current runtime logs">
+                    <IconButton size="small" aria-label={`Current logs for ${t.runtimeName || t.runtimeId}`} onClick={() => onLogs(t.runtimeId)}>
+                      <FileText size={15} />
+                    </IconButton>
+                  </Tooltip>
+                </Stack>
+              </ListingTable.Cell>
+              {actions && (
+                <ListingTable.Cell>
+                  <Stack direction="row" gap={0.5} flexWrap="wrap">
+                    {onDecision && t.conflictDetected && <FormControlLabel control={<Checkbox disabled={busy} checked={decisions?.[t.targetId] ?? t.deleteBeforeUpload} onChange={(e) => onDecision(t.targetId, e.target.checked)} />} label="Replace existing" />}
+                    {onRecheck && t.phase === 'INDETERMINATE' && (
+                      <Button size="small" disabled={busy} onClick={() => onRecheck(t.targetId)}>
+                        Recheck
+                      </Button>
+                    )}
+                    {onRetry && retryable.has(t.phase) && (
+                      <Button size="small" disabled={busy} onClick={() => onRetry(t.targetId)}>
+                        Prepare retry
+                      </Button>
+                    )}
+                    {onCancel && t.phase === 'QUEUED' && (
+                      <Button size="small" color="inherit" disabled={busy} onClick={() => onCancel(t.targetId)}>
+                        Cancel
+                      </Button>
+                    )}
+                  </Stack>
+                </ListingTable.Cell>
+              )}
+            </ListingTable.Row>
+          ))}
+        </ListingTable.Body>
+      </ListingTable>
+    </Box>
+  );
+}
+
+function EventsDrawer({ org, operation, targetId, onClose }: { org: string; operation: MiDeployment; targetId?: string; onClose: () => void }): JSX.Element {
+  const [page, setPage] = useState(0);
+  const target = operation.targets.find((t) => t.targetId === targetId);
+  const query = useQuery({ queryKey: ['mi-events', org, operation.id, targetId, page], queryFn: () => getMiDeploymentEvents(operation.id, org, targetId, 25, page * 25), refetchInterval: active.has(operation.status) ? 3000 : false });
+  return (
+    <Drawer anchor="right" open onClose={onClose} sx={{ '& .MuiDrawer-paper': { width: { xs: '100%', sm: 560 }, maxWidth: '100%', p: 3 } }}>
+      <Stack direction="row" justifyContent="space-between" alignItems="center">
+        <Typography variant="h6">{target ? 'Runtime execution details' : 'Deployment events'}</Typography>
+        <IconButton aria-label="Close execution details" onClick={onClose}>
+          <X size={20} />
+        </IconButton>
+      </Stack>
+      {target && (
+        <Stack gap={2} sx={{ my: 2 }}>
+          <Typography>
+            {target.projectName || target.projectId} / {target.runtimeName || target.runtimeId}
+          </Typography>
+          <Box>
+            <Status value={target.phase} />
+          </Box>
+          <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 2 }}>
+            <Field title="Attempt">{target.attempt || 'Not started'}</Field>
+            <Field title="Duration">{duration(target)}</Field>
+            <Field title="Started">{date(target.startedAt)}</Field>
+            <Field title="Finished">{date(target.finishedAt)}</Field>
+            <Field title="HTTP status">{target.httpStatus ?? '\u2014'}</Field>
+            <Field title="Reason">{target.reason || '\u2014'}</Field>
+          </Box>
+          <Field title="Message">{target.message || '\u2014'}</Field>
+          {target.evidence?.length > 0 && (
+            <Field title="Evidence">
+              {target.evidence.map((item, index) => (
+                <Typography key={index} variant="body2" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
+                  {item}
+                </Typography>
+              ))}
+            </Field>
+          )}
+        </Stack>
+      )}
+      <Divider sx={{ my: 2 }} />
+      <Typography variant="subtitle1">Recorded events</Typography>
+      <Typography variant="caption" color="text.secondary" sx={{ mb: 2 }}>
+        Saved deployment events. Current runtime log files are available separately.
+      </Typography>
+      {query.isLoading && <CircularProgress />}
+      {query.isError && (
+        <Alert severity="error" action={<Button onClick={() => void query.refetch()}>Retry</Button>}>
+          Unable to load events.
+        </Alert>
+      )}
+      {query.data?.items.length === 0 && <Typography color="text.secondary">No events were recorded.</Typography>}
+      <Stack gap={2}>
+        {query.data?.items.map((event) => (
+          <Box key={event.eventId} sx={{ borderLeft: '2px solid', borderColor: 'divider', pl: 2 }}>
+            <Typography variant="caption" color="text.secondary">
+              {date(event.createdAt)}
+            </Typography>
+            <Typography variant="subtitle2">{label(event.phase)}</Typography>
+            <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
+              {event.message}
+            </Typography>
+            {event.reason && (
+              <Typography variant="caption" display="block">
+                Reason: {event.reason}
+              </Typography>
+            )}
+            {event.httpStatus != null && (
+              <Typography variant="caption" display="block">
+                HTTP {event.httpStatus}
+              </Typography>
+            )}
+            {event.evidence?.map((text, index) => (
+              <Typography key={index} variant="caption" display="block" sx={{ overflowWrap: 'anywhere' }}>
+                {text}
+              </Typography>
+            ))}
+          </Box>
         ))}
-      </ListingTable.Body>
-    </ListingTable>
-    {logRuntimeId && <LogFilesDrawer runtimeId={logRuntimeId} onClose={() => setLogRuntimeId(null)} />}
-    </>
+      </Stack>
+      {query.data && <TablePagination component="div" count={query.data.total} page={page} rowsPerPage={25} rowsPerPageOptions={[25]} onPageChange={(_, next) => setPage(next)} />}
+    </Drawer>
   );
 }

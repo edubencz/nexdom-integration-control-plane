@@ -17,7 +17,7 @@
  */
 
 import { Box, CircularProgress, FormControlLabel, Switch, Typography } from '@wso2/oxygen-ui';
-import type { SxProps } from '@mui/system';
+import type { SxProps } from '@wso2/oxygen-ui';
 
 interface SyncSwitchProps {
   label: string;
