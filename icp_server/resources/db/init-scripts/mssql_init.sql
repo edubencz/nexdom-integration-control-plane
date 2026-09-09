@@ -2366,3 +2366,27 @@ VALUES (
         NULL
     );
 GO
+
+CREATE TABLE mi_deployment_artifacts (artifact_id VARCHAR(36) PRIMARY KEY, file_name VARCHAR(255) NOT NULL, artifact_name VARCHAR(255) NOT NULL, artifact_version VARCHAR(100) NOT NULL, sha256 CHAR(64) NOT NULL, file_size BIGINT NOT NULL, content VARBINARY(MAX) NOT NULL, expires_at DATETIME2 NOT NULL, created_at DATETIME2 NOT NULL);
+IF OBJECT_ID('mi_deployment_operations','U') IS NULL CREATE TABLE mi_deployment_operations (deployment_id VARCHAR(36) PRIMARY KEY, org_id INT NOT NULL, org_handler VARCHAR(255) NOT NULL, artifact_id VARCHAR(36) NOT NULL, status VARCHAR(40) NOT NULL, created_by VARCHAR(255) NOT NULL, parent_deployment_id VARCHAR(36), version INT NOT NULL DEFAULT 0, created_at DATETIME2 NOT NULL, updated_at DATETIME2 NOT NULL);
+IF OBJECT_ID('mi_deployment_targets','U') IS NULL CREATE TABLE mi_deployment_targets (target_id VARCHAR(36) PRIMARY KEY, deployment_id VARCHAR(36) NOT NULL REFERENCES mi_deployment_operations(deployment_id) ON DELETE CASCADE, project_id VARCHAR(36) NOT NULL, component_id VARCHAR(36) NOT NULL, environment_id VARCHAR(36) NOT NULL, runtime_id VARCHAR(36) NOT NULL, production BIT NOT NULL, eligible BIT NOT NULL, conflict BIT NOT NULL, delete_before_upload BIT NOT NULL DEFAULT 0, phase VARCHAR(40) NOT NULL, attempt INT NOT NULL DEFAULT 0, lease_until DATETIME2 NULL, http_status INT, reason VARCHAR(1000), message VARCHAR(4000), evidence NVARCHAR(MAX), updated_at DATETIME2 NOT NULL);
+IF OBJECT_ID('mi_deployment_events','U') IS NULL CREATE TABLE mi_deployment_events (event_id VARCHAR(36) PRIMARY KEY, deployment_id VARCHAR(36) NOT NULL REFERENCES mi_deployment_operations(deployment_id) ON DELETE CASCADE, target_id VARCHAR(36), phase VARCHAR(40) NOT NULL, message VARCHAR(4000) NOT NULL, created_at DATETIME2 NOT NULL);
+
+-- Apply once after add_mi_deployments_feature_mssql.sql. Existing history is retained.
+ALTER TABLE mi_deployment_operations ADD started_at VARCHAR(40) NULL;
+ALTER TABLE mi_deployment_operations ADD finished_at VARCHAR(40) NULL;
+ALTER TABLE mi_deployment_operations ADD duration_ms BIGINT NULL;
+ALTER TABLE mi_deployment_operations ADD selected_project_ids NVARCHAR(MAX) NULL;
+ALTER TABLE mi_deployment_targets ADD project_name VARCHAR(255) NULL;
+ALTER TABLE mi_deployment_targets ADD component_name VARCHAR(255) NULL;
+ALTER TABLE mi_deployment_targets ADD environment_name VARCHAR(255) NULL;
+ALTER TABLE mi_deployment_targets ADD runtime_name VARCHAR(255) NULL;
+ALTER TABLE mi_deployment_targets ADD started_at VARCHAR(40) NULL;
+ALTER TABLE mi_deployment_targets ADD finished_at VARCHAR(40) NULL;
+ALTER TABLE mi_deployment_targets ADD duration_ms BIGINT NULL;
+ALTER TABLE mi_deployment_events ADD reason VARCHAR(1000) NULL;
+ALTER TABLE mi_deployment_events ADD http_status INT NULL;
+ALTER TABLE mi_deployment_events ADD evidence NVARCHAR(MAX) NULL;
+CREATE INDEX idx_mi_dep_org_created ON mi_deployment_operations (org_handler, created_at);
+CREATE INDEX idx_mi_dep_target_op ON mi_deployment_targets (deployment_id);
+CREATE INDEX idx_mi_dep_event_op ON mi_deployment_events (deployment_id, created_at);

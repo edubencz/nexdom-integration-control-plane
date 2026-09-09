@@ -139,6 +139,16 @@ public isolated function sqlQueryFromString(string sqlString) returns sql:Parame
     return query;
 }
 
+// Bind an ISO-8601 timestamp string using the database's timestamp type.
+// PostgreSQL does not implicitly compare a VARCHAR bind parameter with a
+// TIMESTAMP column, so the cast must be part of the parameterized query.
+public isolated function timestampParameter(string value) returns sql:ParameterizedQuery {
+    if dbType == POSTGRESQL {
+        return `CAST(${value} AS TIMESTAMP)`;
+    }
+    return `${value}`;
+}
+
 // Database type helper functions
 public isolated function isMSSQL() returns boolean => dbType == MSSQL;
 

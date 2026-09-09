@@ -22,7 +22,6 @@ type DeploymentMemory record {|
     byte[] content;
 |};
 
-map<DeploymentMemory> deploymentMemory = {};
 map<string> deploymentIdempotency = {};
 
 function deploymentError(int status, string message) returns http:Response {
@@ -35,39 +34,44 @@ function deploymentError(int status, string message) returns http:Response {
 function now() returns string => time:utcToString(time:utcNow());
 
 function transitionAllowed(types:MIDeploymentStatus status, string action) returns boolean {
-    if action == "preflight" { return status == types:DRAFT || status == types:AWAITING_DECISIONS; }
+    if action == "preflight" { return status == types:DRAFT || status == types:AWAITING_DECISIONS || status == types:READY; }
     if action == "decisions" { return status == types:AWAITING_DECISIONS || status == types:READY; }
     if action == "execute" { return status == types:READY; }
     if action == "cancel" { return status == types:DRAFT || status == types:PREFLIGHT || status == types:AWAITING_DECISIONS || status == types:READY || status == types:RUNNING || status == types:CANCELLING; }
-    if action == "recheck" { return status == types:COMPLETED || status == types:COMPLETED_WITH_ISSUES || status == types:RUNNING; }
+    if action == "recheck" { return status == types:COMPLETED || status == types:COMPLETED_WITH_ISSUES || status == types:FAILED; }
     return true;
 }
 
 function responseFor(DeploymentMemory memory) returns http:Response {
     http:Response response = new;
-    response.setJsonPayload({
-        id: memory.operation.deploymentId,
-        orgHandler: memory.operation.orgHandler,
-        status: memory.operation.status.toString(),
-        artifactName: memory.operation.artifactName,
-        artifactVersion: memory.operation.artifactVersion,
-        fileName: memory.operation.fileName,
-        fileSize: memory.operation.fileSize,
-        sha256: memory.operation.sha256,
-        createdAt: memory.operation.createdAt,
-        updatedAt: memory.operation.updatedAt,
-        targets: memory.targets
-    });
+    response.setJsonPayload(storage:miDeploymentPayload(memory.operation, memory.targets));
     return response;
 }
 
 function hydrateDeployment(string deploymentId) returns DeploymentMemory|error {
-    record {| types:MIDeploymentOperation operation; byte[] content; |}|error loaded = storage:loadMIDeploymentMemory(deploymentId);
-    if loaded is error { error err = loaded; return err; }
-    record {| types:MIDeploymentOperation operation; byte[] content; |} loadedValue = loaded;
-    DeploymentMemory memory = {operation: loadedValue.operation, targets: [], content: loadedValue.content};
-    deploymentMemory[deploymentId] = memory;
-    return memory;
+    var loaded = check storage:loadMIDeploymentMemory(deploymentId);
+    return {operation: loaded.operation, targets: check storage:loadMIDeploymentTargets(deploymentId), content: loaded.content};
+}
+
+function deploymentAccess(types:UserContextV2 context, http:Request request, string? deploymentId = (), boolean manage = true) returns http:Response? {
+    string? org = request.getQueryParamValue("orgHandler");
+    int orgId;
+    if deploymentId is string {
+        types:MIDeploymentOperation?|error found = storage:loadMIDeploymentOperation(deploymentId);
+        if found is error { return deploymentError(503, "Unable to read deployment storage"); }
+        if found is () { return deploymentError(404, "Deployment not found"); }
+        if org is string && org != found.orgHandler { return deploymentError(404, "Deployment not found in this organization"); }
+        orgId = found.orgId;
+    } else {
+        if org is () || org.trim() == "" { return deploymentError(400, "orgHandler is required"); }
+        int|error resolved = storage:getOrgIdByHandle(org);
+        if resolved is error { return deploymentError(404, "Organization not found"); }
+        orgId = resolved;
+    }
+    boolean|error allowed = auth:hasAnyPermission(context.userId,
+        manage ? [auth:PERMISSION_DEPLOYMENT_MANAGE] : [auth:PERMISSION_DEPLOYMENT_VIEW, auth:PERMISSION_DEPLOYMENT_MANAGE], {orgUuid: orgId});
+    if allowed is error { return deploymentError(503, "Unable to verify deployment permission"); }
+    return allowed ? () : deploymentError(403, manage ? "Deployment manage permission required" : "Deployment view permission required");
 }
 
 function callerContext(http:Request request) returns types:UserContextV2|http:Response {
@@ -76,12 +80,6 @@ function callerContext(http:Request request) returns types:UserContextV2|http:Re
     types:UserContextV2|error context = auth:extractUserContextV2(header);
     if context is error { return deploymentError(401, "Invalid token"); }
     return context;
-}
-
-function canDeploy(types:UserContextV2 context) returns boolean|error {
-    return auth:hasAnyPermission(context.userId,
-        [auth:PERMISSION_DEPLOYMENT_MANAGE, auth:PERMISSION_INTEGRATION_MANAGE,
-         auth:PERMISSION_INTEGRATION_EDIT], auth:buildAccessScope());
 }
 
 function fileFromRequest(http:Request request) returns [string, byte[]]|http:Response|error {
@@ -164,7 +162,7 @@ function operationPayload(string orgHandler, string fileName, byte[] content, st
 // faultyList; unknown/missing fields are intentionally ignored for compatibility.
 function applicationState(http:Client mgmt, string token, string name, string version) returns string|error {
     http:Response response = check mgmt->get("/management/applications", {"Authorization": "Bearer " + token, "Accept": "application/json"});
-    if response.statusCode < 200 || response.statusCode >= 300 { return error(string `GET applications returned HTTP ${response.statusCode}`); }
+    if response.statusCode < 200 || response.statusCode >= 300 { return error(string `GET applications returned HTTP ${response.statusCode}`, httpStatus = response.statusCode); }
     json payload = check response.getJsonPayload();
     if payload is map<json> {
         foreach string listKey in ["activeList", "faultyList"] {
@@ -198,17 +196,10 @@ function probeRuntimeConflict(types:Runtime runtime, string artifactName, string
     return state == "active" || state == "faulty";
 }
 
-function persistTargetState(string deploymentId, int targetIndex, types:MIDeploymentTarget target) {
-    error? targetUpdate = storage:updateMIDeploymentTarget(target);
-    if targetUpdate is error { log:printWarn("Unable to persist deployment target state", targetUpdate); }
-    error? eventPersisted = storage:persistMIDeploymentEvent(uuid:createType4AsString(), deploymentId, target.targetId, target.phase.toString(), target.message ?: "Target phase updated");
-    if eventPersisted is error { log:printWarn("Unable to persist deployment event", eventPersisted); }
-    DeploymentMemory? current = deploymentMemory[deploymentId];
-    if current is DeploymentMemory && targetIndex < current.targets.length() {
-        current.targets[targetIndex] = target;
-        current.operation.updatedAt = now();
-        deploymentMemory[deploymentId] = current;
-    }
+function persistTargetState(string deploymentId, int targetIndex, types:MIDeploymentTarget target) returns error? {
+    target.updatedAt = now();
+    error? persisted = storage:saveMIDeploymentTarget(target);
+    if persisted is error { return error("Deployment persistence failed", persisted); }
 }
 
 function uploadTarget(DeploymentMemory memory, types:MIDeploymentTarget target, string deploymentId, int targetIndex) returns [types:MIDeploymentTarget, string]|error {
@@ -223,7 +214,7 @@ function uploadTarget(DeploymentMemory memory, types:MIDeploymentTarget target, 
     http:Client mgmtClient = clientResult;
     string token = check storage:issueRuntimeHmacToken(target.runtimeId);
     string|error existing = applicationState(mgmtClient, token, memory.operation.artifactName, memory.operation.artifactVersion);
-    if existing is error { target.phase = types:INDETERMINATE; target.message = existing.message(); return [target, "Preflight verification failed"]; }
+    if existing is error { target.httpStatus = runtimeErrorStatus(existing); target.phase = types:INDETERMINATE; target.message = existing.message(); return [target, "Preflight verification failed"]; }
     if (existing == "active" || existing == "faulty") && !target.deleteBeforeUpload {
         target.phase = types:SKIPPED_CONFLICT; target.reason = "Exact name/version already exists";
         return [target, "Conflict skipped"];
@@ -231,7 +222,7 @@ function uploadTarget(DeploymentMemory memory, types:MIDeploymentTarget target, 
     if target.deleteBeforeUpload {
         target.phase = types:DELETING;
         target.message = "Removing existing Carbon Application";
-        persistTargetState(deploymentId, targetIndex, target);
+        check persistTargetState(deploymentId, targetIndex, target);
         // MI identifies Carbon Applications as <artifact name>-<version>. When
         // the CAR does not expose a version, artifactName already contains the
         // complete runtime application name and must be used as-is.
@@ -249,17 +240,18 @@ function uploadTarget(DeploymentMemory memory, types:MIDeploymentTarget target, 
         if deleted is error {
             target.phase = types:FAILED; target.message = string `Unable to remove the existing Carbon Application: ${deleted.message()}`; return [target, "DELETE failed"];
         }
+        target.httpStatus = deleted.statusCode;
         if deleted.statusCode < 200 || deleted.statusCode >= 300 {
-            target.phase = types:FAILED; target.message = string `Unable to remove the existing Carbon Application (HTTP ${deleted.statusCode})`; return [target, "DELETE failed"];
+            target.phase = types:FAILED; target.reason = "DELETE_FAILED"; target.message = string `Unable to remove the existing Carbon Application (HTTP ${deleted.statusCode})`; return [target, "DELETE failed"];
         }
         // A successful DELETE is the authoritative removal result. The
         // applications listing may remain stale briefly after deletion, so an
         // immediate GET must not prevent the subsequent CAR upload.
         target.phase = types:VERIFYING_DELETE;
-        persistTargetState(deploymentId, targetIndex, target);
+        check persistTargetState(deploymentId, targetIndex, target);
     }
-    target.phase = types:UPLOADING;
-    persistTargetState(deploymentId, targetIndex, target);
+    target.phase = types:UPLOADING; target.message = "Uploading Carbon Application";
+    check persistTargetState(deploymentId, targetIndex, target);
     mime:Entity part = new;
     part.setByteArray(memory.content, "application/octet-stream");
     part.setContentDisposition(mime:getContentDispositionObject(string `form-data; name=file; filename=${memory.operation.fileName}`));
@@ -269,17 +261,18 @@ function uploadTarget(DeploymentMemory memory, types:MIDeploymentTarget target, 
     outbound.setHeader("Authorization", "Bearer " + token);
     outbound.setHeader("Accept", "application/json");
     http:Response|error uploaded = mgmtClient->post("/management/applications", outbound);
+    if uploaded is http:Response { target.httpStatus = uploaded.statusCode; }
     if uploaded is error || uploaded.statusCode < 200 || uploaded.statusCode >= 300 {
-        target.phase = types:FAILED; target.message = uploaded is error ? uploaded.message() : string `POST returned HTTP ${uploaded.statusCode}`; return [target, "POST failed"];
+        target.phase = types:FAILED; target.reason = "UPLOAD_FAILED"; target.message = uploaded is error ? uploaded.message() : string `POST returned HTTP ${uploaded.statusCode}`; return [target, "POST failed"];
     }
-    target.phase = types:VERIFYING_DEPLOY; target.attempt += 1;
-    persistTargetState(deploymentId, targetIndex, target);
+    target.phase = types:VERIFYING_DEPLOY; target.message = "Upload accepted; verifying runtime application";
+    check persistTargetState(deploymentId, targetIndex, target);
     int remaining = miDeploymentVerifyAttempts;
     while remaining > 0 {
         string|error state = applicationState(mgmtClient, token, memory.operation.artifactName, memory.operation.artifactVersion);
-        if state == "active" { target.phase = types:SUCCEEDED; target.message = "Runtime confirmed active"; return [target, "Succeeded"]; }
-        if state == "faulty" { target.phase = types:FAULTY; target.message = "Runtime reported faulty application"; return [target, "Faulty"]; }
-        if state is error { target.phase = types:INDETERMINATE; target.message = state.message(); return [target, "Verification unavailable"]; }
+        if state == "active" { target.reason = (); target.phase = types:SUCCEEDED; target.message = "Runtime confirmed active"; return [target, "Succeeded"]; }
+        if state == "faulty" { target.reason = "RUNTIME_FAULTY"; target.phase = types:FAULTY; target.message = "Runtime reported faulty application"; return [target, "Faulty"]; }
+        if state is error { target.httpStatus = runtimeErrorStatus(state); target.phase = types:INDETERMINATE; target.message = state.message(); return [target, "Verification unavailable"]; }
         remaining -= 1;
         if remaining > 0 {
             // Do not exhaust all verification attempts in a tight loop. MI may
@@ -287,11 +280,12 @@ function uploadTarget(DeploymentMemory memory, types:MIDeploymentTarget target, 
             runtime:sleep(<decimal>miDeploymentVerifyIntervalSeconds);
         }
     }
-    target.phase = types:INDETERMINATE; target.message = "Upload accepted but runtime confirmation timed out";
+    target.phase = types:INDETERMINATE; target.reason = "VERIFICATION_TIMEOUT"; target.message = "Upload accepted but runtime confirmation timed out";
     return [target, "Indeterminate"];
 }
 
 function recheckTarget(DeploymentMemory memory, types:MIDeploymentTarget target) returns types:MIDeploymentTarget {
+    target.httpStatus = ();
     types:Runtime?|error runtimeResult = storage:getRuntimeById(target.runtimeId);
     if runtimeResult is error || runtimeResult is () { target.phase = types:INDETERMINATE; target.message = "Runtime unavailable during recheck"; return target; }
     string|error base = storage:buildManagementBaseUrl(runtimeResult.managementHostname, runtimeResult.managementPort);
@@ -301,42 +295,52 @@ function recheckTarget(DeploymentMemory memory, types:MIDeploymentTarget target)
     string|error token = storage:issueRuntimeHmacToken(target.runtimeId);
     if token is error { target.phase = types:INDETERMINATE; target.message = token.message(); return target; }
     string|error state = applicationState(mgmt, token, memory.operation.artifactName, memory.operation.artifactVersion);
-    if state == "active" { target.phase = types:SUCCEEDED; target.message = "Runtime confirmed active"; }
-    else if state == "faulty" { target.phase = types:FAULTY; target.message = "Runtime reported faulty application"; }
-    else if state is error { target.phase = types:INDETERMINATE; target.message = state.message(); }
+    if state == "active" { target.reason = (); target.phase = types:SUCCEEDED; target.message = "Runtime confirmed active"; }
+    else if state == "faulty" { target.reason = "RUNTIME_FAULTY"; target.phase = types:FAULTY; target.message = "Runtime reported faulty application"; }
+    else if state is error { target.httpStatus = runtimeErrorStatus(state); target.phase = types:INDETERMINATE; target.message = state.message(); }
     else { target.phase = types:INDETERMINATE; target.message = "Application not present"; }
     return target;
 }
 
+map<string> deploymentWorkerErrors = {};
+
 function executeDeployment(string deploymentId) {
-    DeploymentMemory? found = deploymentMemory[deploymentId];
-    if found is () { return; }
-    DeploymentMemory memory = found;
-    foreach int index in 0 ..< memory.targets.length() {
-        if !memory.targets[index].eligible || memory.targets[index].phase == types:SKIPPED_CONFLICT { continue; }
-        memory.targets[index].phase = types:VALIDATING;
-        memory.targets[index].message = "Validating runtime before deployment";
-        persistTargetState(deploymentId, index, memory.targets[index]);
-        boolean|error claimed = storage:claimMIDeploymentTarget(memory.targets[index].targetId, miDeploymentVerifyIntervalSeconds * miDeploymentVerifyAttempts);
-        if claimed is error || !claimed {
-            memory.targets[index].phase = types:INDETERMINATE;
-            memory.targets[index].message = "Target is already leased by another worker";
-            persistTargetState(deploymentId, index, memory.targets[index]);
-            continue;
+    do {
+        DeploymentMemory memory = check hydrateDeployment(deploymentId);
+        if memory.operation.status != types:RUNNING && memory.operation.status != types:CANCELLING { return; }
+        foreach int index in 0 ..< memory.targets.length() {
+            types:MIDeploymentTarget[] fresh = check storage:loadMIDeploymentTargets(deploymentId);
+            types:MIDeploymentTarget target = fresh[index];
+            if !target.eligible || target.phase != types:QUEUED { continue; }
+            target.phase = types:VALIDATING;
+            target.reason = ();
+            target.message = "Validating runtime before deployment";
+            target.startedAt = now();
+            target.attempt += 1;
+            boolean claimed = check storage:claimMIDeploymentTarget(target);
+            if !claimed { continue; }
+            [types:MIDeploymentTarget, string]|error result = uploadTarget(memory, target, deploymentId, index);
+            if result is error {
+                // A failed persistence boundary must stop the worker, not become a successful in-memory result.
+                if result.message() == "Deployment persistence failed" { fail result; }
+                target.phase = types:FAILED; target.reason = "EXECUTION_FAILED"; target.message = result.message();
+            } else { target = result[0]; }
+            target.finishedAt = now();
+            target.durationMs = storage:miDeploymentDuration(target.startedAt, <string>target.finishedAt);
+            check persistTargetState(deploymentId, index, target);
         }
-        [types:MIDeploymentTarget, string]|error result = uploadTarget(memory, memory.targets[index], deploymentId, index);
-        if result is error { memory.targets[index].phase = types:FAILED; memory.targets[index].message = result.message(); }
-        else { memory.targets[index] = result[0]; }
-        persistTargetState(deploymentId, index, memory.targets[index]);
-        error? released = storage:releaseMIDeploymentTarget(memory.targets[index].targetId);
-        if released is error { log:printWarn("Unable to release deployment target lease", released); }
+        DeploymentMemory finished = check hydrateDeployment(deploymentId);
+        finished.operation.status = storage:miDeploymentStatus(finished.targets);
+        finished.operation.finishedAt = now();
+        finished.operation.durationMs = storage:miDeploymentDuration(finished.operation.startedAt, <string>finished.operation.finishedAt);
+        finished.operation.updatedAt = now();
+        check storage:saveMIDeploymentOperation(finished.operation, "Deployment execution finished");
+    } on fail error e {
+        lock { deploymentWorkerErrors[deploymentId] = "Execution stopped because deployment storage could not be updated. Runtime state must be rechecked."; }
+        error? recorded = storage:interruptMIDeployment(deploymentId, "Execution stopped after a persistence error; runtime recheck required");
+        if recorded is error { log:printError("Unable to persist interrupted deployment", recorded); }
+        log:printError("Deployment worker stopped", e, deploymentId = deploymentId);
     }
-    boolean hasIssues = memory.targets.some((target) => target.phase == types:FAILED || target.phase == types:FAULTY || target.phase == types:INDETERMINATE);
-    memory.operation.status = hasIssues ? types:COMPLETED_WITH_ISSUES : types:COMPLETED;
-    memory.operation.updatedAt = now();
-    error? operationPersisted = storage:updateMIDeploymentOperation(memory.operation);
-    if operationPersisted is error { log:printWarn("Unable to persist deployment status", operationPersisted); }
-    deploymentMemory[deploymentId] = memory;
 }
 
 @http:ServiceConfig {
@@ -349,8 +353,8 @@ service /icp/mi_deployments on httpListener {
     resource function post .(http:Caller caller, http:Request request) returns error? {
         types:UserContextV2|http:Response contextResult = callerContext(request);
         if contextResult is http:Response { check caller->respond(contextResult); return; }
-        boolean|error permitted = canDeploy(contextResult);
-        if permitted is error || !permitted { check caller->respond(deploymentError(403, "Deployment manage permission required")); return; }
+        http:Response? denied = deploymentAccess(contextResult, request);
+        if denied is http:Response { check caller->respond(denied); return; }
         [string, byte[]]|http:Response|error fileResult = fileFromRequest(request);
         if fileResult is error { check caller->respond(deploymentError(400, fileResult.message())); return; }
         if fileResult is http:Response { check caller->respond(fileResult); return; }
@@ -358,18 +362,18 @@ service /icp/mi_deployments on httpListener {
         if orgHandler is () || orgHandler.trim() == "" { check caller->respond(deploymentError(400, "orgHandler is required")); return; }
         string org = orgHandler is string ? orgHandler : "";
         string|http:HeaderNotFoundError idempotencyHeader = request.getHeader("Idempotency-Key");
-        if idempotencyHeader is string && deploymentIdempotency.hasKey(idempotencyHeader) {
-            string? existingId = deploymentIdempotency[idempotencyHeader];
+        if idempotencyHeader is string && deploymentIdempotency.hasKey(contextResult.userId + ":" + org + ":" + idempotencyHeader) {
+            string? existingId = deploymentIdempotency[contextResult.userId + ":" + org + ":" + idempotencyHeader];
             if existingId is string {
-                DeploymentMemory? existing = deploymentMemory[existingId];
+                DeploymentMemory|error existing = hydrateDeployment(existingId);
                 if existing is DeploymentMemory { check caller->respond(responseFor(existing)); return; }
             }
         }
         DeploymentMemory memory = operationPayload(org, fileResult[0], fileResult[1], contextResult.userId);
+        memory.operation.orgId = check storage:getOrgIdByHandle(org);
         error? persisted = storage:persistMIDeployment(memory.operation, memory.content);
         if persisted is error { check caller->respond(deploymentError(503, "Unable to persist deployment artifact: " + persisted.message())); return; }
-        deploymentMemory[memory.operation.deploymentId] = memory;
-        if idempotencyHeader is string && idempotencyHeader.trim() != "" { deploymentIdempotency[idempotencyHeader] = memory.operation.deploymentId; }
+        if idempotencyHeader is string && idempotencyHeader.trim() != "" { deploymentIdempotency[contextResult.userId + ":" + org + ":" + idempotencyHeader] = memory.operation.deploymentId; }
         auditRestMutation(storage:AUDIT_MI_DEPLOYMENT_CREATE, contextResult.userId, contextResult.username, request, storage:AUDIT_RESOURCE_MI_DEPLOYMENT, memory.operation.deploymentId, string `artifact=${memory.operation.sha256}; org=${org}`, "SUCCESS");
         check caller->respond(responseFor(memory));
     }
@@ -377,246 +381,243 @@ service /icp/mi_deployments on httpListener {
     resource function get .(http:Caller caller, http:Request request) returns error? {
         types:UserContextV2|http:Response contextResult = callerContext(request);
         if contextResult is http:Response { check caller->respond(contextResult); return; }
-        boolean|error permitted = auth:hasAnyPermission(contextResult.userId, [auth:PERMISSION_DEPLOYMENT_VIEW, auth:PERMISSION_DEPLOYMENT_MANAGE], auth:buildAccessScope());
-        if permitted is error || !permitted { check caller->respond(deploymentError(403, "Deployment view permission required")); return; }
-        int pageLimit = 10;
-        int pageOffset = 0;
-        string? limitParam = request.getQueryParamValue("limit");
-        string? offsetParam = request.getQueryParamValue("offset");
-        if limitParam is string { int|error parsedLimit = int:fromString(limitParam); if parsedLimit is int { pageLimit = parsedLimit; } }
-        if offsetParam is string { int|error parsedOffset = int:fromString(offsetParam); if parsedOffset is int { pageOffset = parsedOffset; } }
-        record {| json[] items; int total; |}|error persisted = storage:listMIDeploymentOperations(request.getQueryParamValue("orgHandler"), pageLimit, pageOffset);
-        if persisted is error { check caller->respond(deploymentError(503, "Unable to load deployment history")); return; }
-        check caller->respond({items: persisted.items, total: persisted.total});
+        http:Response? denied = deploymentAccess(contextResult, request, (), false);
+        if denied is http:Response { check caller->respond(denied); return; }
+        var result = storage:listMIDeploymentOperations(request.getQueryParamValue("orgHandler"), pageParameter(request, "limit", 10), pageParameter(request, "offset", 0));
+        if result is error { check caller->respond(deploymentError(503, "Unable to load deployment history")); return; }
+        check caller->respond(result);
     }
 
     resource function get [string deploymentId](http:Caller caller, http:Request request) returns error? {
         types:UserContextV2|http:Response contextResult = callerContext(request);
         if contextResult is http:Response { check caller->respond(contextResult); return; }
-        boolean|error canView = auth:hasAnyPermission(contextResult.userId, [auth:PERMISSION_DEPLOYMENT_VIEW, auth:PERMISSION_DEPLOYMENT_MANAGE], auth:buildAccessScope());
-        if canView is error || !canView { check caller->respond(deploymentError(canView is error ? 500 : 403, "Deployment view permission required")); return; }
-        if !deploymentMemory.hasKey(deploymentId) {
-            json?|error persisted = storage:getMIDeploymentOperation(deploymentId);
-            if persisted is json { check caller->respond(persisted); return; }
-            check caller->respond(deploymentError(404, "Deployment not found")); return;
-        }
-        DeploymentMemory? found = deploymentMemory[deploymentId];
-        if found is () { check caller->respond(deploymentError(404, "Deployment not found")); return; }
-        check caller->respond(responseFor(found));
+        http:Response? denied = deploymentAccess(contextResult, request, deploymentId, false);
+        if denied is http:Response { check caller->respond(denied); return; }
+        string? workerError;
+        lock { workerError = deploymentWorkerErrors[deploymentId]; }
+        json?|error result = storage:getMIDeploymentOperation(deploymentId);
+        if result is error { check caller->respond(deploymentError(503, "Unable to load deployment details")); return; }
+        if result is () { check caller->respond(deploymentError(404, "Deployment not found")); return; }
+        if result is map<json> && workerError is string { result["executionError"] = workerError; }
+        check caller->respond(result);
+    }
+
+    resource function get [string deploymentId]/events(http:Caller caller, http:Request request) returns error? {
+        types:UserContextV2|http:Response contextResult = callerContext(request);
+        if contextResult is http:Response { check caller->respond(contextResult); return; }
+        http:Response? denied = deploymentAccess(contextResult, request, deploymentId, false);
+        if denied is http:Response { check caller->respond(denied); return; }
+        var result = storage:listMIDeploymentEvents(deploymentId, request.getQueryParamValue("targetId"), pageParameter(request, "limit", 25), pageParameter(request, "offset", 0));
+        if result is error { check caller->respond(deploymentError(503, "Unable to load deployment events")); return; }
+        check caller->respond(result);
     }
 
     resource function delete [string deploymentId](http:Caller caller, http:Request request) returns error? {
         types:UserContextV2|http:Response contextResult = callerContext(request);
         if contextResult is http:Response { check caller->respond(contextResult); return; }
-        boolean|error permitted = canDeploy(contextResult);
-        if permitted is error || !permitted { check caller->respond(deploymentError(403, "Deployment manage permission required")); return; }
+        http:Response? denied = deploymentAccess(contextResult, request, deploymentId, true);
+        if denied is http:Response { check caller->respond(denied); return; }
         error? deleted = storage:deleteMIDeployment(deploymentId);
-        if deleted is error { check caller->respond(deploymentError(500, "Unable to delete deployment: " + deleted.message())); return; }
-        if deploymentMemory.hasKey(deploymentId) {
-            anydata removed = deploymentMemory.remove(deploymentId);
-        }
-        check caller->respond({"deleted": true, "id": deploymentId});
+        if deleted is error { check caller->respond(deploymentError(409, deleted.message())); return; }
+        check caller->respond({deleted: true});
     }
 
     resource function post [string deploymentId]/preflight(http:Caller caller, http:Request request) returns error? {
         types:UserContextV2|http:Response contextResult = callerContext(request);
         if contextResult is http:Response { check caller->respond(contextResult); return; }
-        boolean|error permitted = canDeploy(contextResult);
-        if permitted is error || !permitted { check caller->respond(deploymentError(403, "Deployment manage permission required")); return; }
-        if !deploymentMemory.hasKey(deploymentId) { DeploymentMemory|error hydrated = hydrateDeployment(deploymentId); if hydrated is error { check caller->respond(deploymentError(404, "Deployment not found")); return; } }
+        http:Response? denied = deploymentAccess(contextResult, request, deploymentId, true);
+        if denied is http:Response { check caller->respond(denied); return; }
+        DeploymentMemory|error loaded = hydrateDeployment(deploymentId);
+        if loaded is error { check caller->respond(deploymentError(503, "Unable to load deployment details")); return; }
+        DeploymentMemory memory = loaded;
+        if !transitionAllowed(memory.operation.status, "preflight") { check caller->respond(deploymentError(409, "Deployment preparation is no longer editable")); return; }
         json|error payload = request.getJsonPayload();
-        if payload is error { check caller->respond(deploymentError(400, "projectIds JSON payload is required")); return; }
-        string[] projectIds = payload is map<json> && payload["projectIds"] is json
-            ? check (<json>payload["projectIds"]).cloneWithType()
-            : check payload.cloneWithType();
-        DeploymentMemory? found = deploymentMemory[deploymentId];
-        if found is () { check caller->respond(deploymentError(404, "Deployment not found")); return; }
-        DeploymentMemory memory = found;
-        if !transitionAllowed(memory.operation.status, "preflight") { check caller->respond(deploymentError(409, "Deployment cannot be preflighted in its current state")); return; }
+        if payload is error || payload !is map<json> || payload["projectIds"] !is json[] { check caller->respond(deploymentError(400, "projectIds must be an array")); return; }
+        string[]|error projectIds = (<json>payload["projectIds"]).cloneWithType();
+        if projectIds is error { check caller->respond(deploymentError(400, "projectIds must contain strings")); return; }
+        if projectIds.length() == 0 { check caller->respond(deploymentError(400, "Select at least one project")); return; }
         memory.targets = [];
+        memory.operation.selectedProjectIds = [];
         foreach string projectId in projectIds {
-            // Snapshot every registered MI runtime so offline/ineligible targets
-            // remain visible in the final report instead of silently disappearing.
+            if memory.operation.selectedProjectIds.indexOf(projectId) >= 0 { continue; }
+            types:Project|error project = storage:getProjectById(projectId);
+            if project is error { check caller->respond(deploymentError(400, "Selected project not found")); return; }
+            if project.orgId != memory.operation.orgId { check caller->respond(deploymentError(403, "Project does not belong to deployment organization")); return; }
+            memory.operation.selectedProjectIds.push(projectId);
             types:Runtime[]|error runtimes = storage:getRuntimes((), "MI", (), projectId, ());
-            if runtimes is error { continue; }
+            if runtimes is error { check caller->respond(deploymentError(503, "Unable to resolve project runtimes")); return; }
             foreach types:Runtime runtime in runtimes {
-                string timestamp = now();
                 boolean eligible = runtime.status == "RUNNING" && runtime.managementHostname is string && runtime.managementPort is string;
                 boolean hasConflict = false;
-                string? probeReason = ();
+                string? reason = eligible ? () : "Runtime is not running or has no management endpoint";
                 if eligible {
                     boolean|error probe = probeRuntimeConflict(runtime, memory.operation.artifactName, memory.operation.artifactVersion);
-                    if probe is error { eligible = false; probeReason = "Unable to query Management API: " + probe.message(); }
+                    if probe is error { eligible = false; reason = "Unable to query Management API: " + probe.message(); }
                     else { hasConflict = probe; }
                 }
-                types:MIDeploymentTarget snapshotTarget = {targetId: uuid:createType4AsString(), deploymentId, projectId, projectName: projectId, componentId: runtime.component.id, componentName: runtime.component.displayName, environmentId: runtime.environment.id, environmentName: runtime.environment.name, runtimeId: runtime.runtimeId, runtimeName: runtime?.runtimeName ?: runtime.runtimeId, production: runtime.environment.name.toLowerAscii().indexOf("prod") >= 0, eligible, conflictDetected: hasConflict, deleteBeforeUpload: false, phase: !eligible ? types:SKIPPED_INELIGIBLE : types:QUEUED, attempt: 0, reason: !eligible ? (probeReason ?: "Runtime is not running or has no management endpoint") : (hasConflict ? "Exact name/version already exists" : "No exact conflict found"), evidence: [], updatedAt: timestamp};
-                error? targetPersisted = storage:persistMIDeploymentTarget(snapshotTarget);
-                if targetPersisted is error { check caller->respond(deploymentError(503, "Unable to persist deployment target: " + targetPersisted.message())); return; }
-                memory.targets.push(snapshotTarget);
-                error? eventPersisted = storage:persistMIDeploymentEvent(uuid:createType4AsString(), deploymentId, snapshotTarget.targetId, snapshotTarget.phase.toString(), "Target added to immutable preflight snapshot");
-                if eventPersisted is error { log:printWarn("Unable to persist deployment event", eventPersisted); }
+                memory.targets.push({targetId: uuid:createType4AsString(), deploymentId, projectId, projectName: project.name,
+                    componentId: runtime.component.id, componentName: runtime.component.displayName, environmentId: runtime.environment.id,
+                    environmentName: runtime.environment.name, runtimeId: runtime.runtimeId, runtimeName: runtime?.runtimeName ?: runtime.runtimeId,
+                    production: runtime.environment.name.toLowerAscii().indexOf("prod") >= 0, eligible, conflictDetected: hasConflict, deleteBeforeUpload: false,
+                    phase: eligible ? types:QUEUED : types:SKIPPED_INELIGIBLE, attempt: 0, reason: reason ?: (hasConflict ? "Exact name/version already exists" : "No exact conflict found"), updatedAt: now()});
             }
         }
         memory.operation.status = types:AWAITING_DECISIONS;
         memory.operation.updatedAt = now();
-        error? operationPersisted = storage:updateMIDeploymentOperation(memory.operation);
-        if operationPersisted is error { log:printWarn("Unable to persist deployment status", operationPersisted); }
-        deploymentMemory[deploymentId] = memory;
+        error? saved = storage:replaceMIDeploymentTargets(memory.operation, memory.targets);
+        if saved is error { check caller->respond(deploymentError(503, "Unable to save preflight snapshot")); return; }
         auditRestMutation(storage:AUDIT_MI_DEPLOYMENT_PREFLIGHT, contextResult.userId, contextResult.username, request, storage:AUDIT_RESOURCE_MI_DEPLOYMENT, deploymentId, string `targets=${memory.targets.length()}`, "SUCCESS");
-        check caller->respond(responseFor(memory));
-    }
-
-    resource function post [string deploymentId]/cancel(http:Caller caller, http:Request callerRequest) returns error? {
-        types:UserContextV2|http:Response contextResult = callerContext(callerRequest);
-        if contextResult is http:Response { check caller->respond(contextResult); return; }
-        boolean|error permitted = canDeploy(contextResult);
-        if permitted is error || !permitted { check caller->respond(deploymentError(403, "Deployment manage permission required")); return; }
-        if !deploymentMemory.hasKey(deploymentId) { DeploymentMemory|error hydrated = hydrateDeployment(deploymentId); if hydrated is error { check caller->respond(deploymentError(404, "Deployment not found")); return; } }
-        DeploymentMemory? found = deploymentMemory[deploymentId];
-        if found is () { check caller->respond(deploymentError(404, "Deployment not found")); return; }
-        DeploymentMemory memory = found;
-        if !transitionAllowed(memory.operation.status, "cancel") { check caller->respond(deploymentError(409, "Deployment cannot be cancelled in its current state")); return; }
-        json|error cancelPayload = callerRequest.getJsonPayload();
-        string? requestedTargetId = cancelPayload is json && cancelPayload is map<json> && cancelPayload["targetId"] is string
-            ? <string>cancelPayload["targetId"] : ();
-        if requestedTargetId is string {
-            boolean cancelled = false;
-            foreach int index in 0 ..< memory.targets.length() {
-                if memory.targets[index].targetId == requestedTargetId && memory.targets[index].phase == types:QUEUED {
-                    memory.targets[index].phase = types:CANCELLED;
-                    memory.targets[index].message = "Target cancellation requested";
-                    error? targetPersisted = storage:updateMIDeploymentTarget(memory.targets[index]);
-                    if targetPersisted is error { log:printWarn("Unable to persist cancelled deployment target", targetPersisted); }
-                    error? eventPersisted = storage:persistMIDeploymentEvent(uuid:createType4AsString(), deploymentId, memory.targets[index].targetId, memory.targets[index].phase.toString(), memory.targets[index].message ?: "Target cancellation requested");
-                    if eventPersisted is error { log:printWarn("Unable to persist deployment event", eventPersisted); }
-                    cancelled = true;
-                }
-            }
-            if !cancelled { check caller->respond(deploymentError(409, "Target is not queued or was not found")); return; }
-            memory.operation.updatedAt = now();
-            deploymentMemory[deploymentId] = memory;
-            auditRestMutation(storage:AUDIT_MI_DEPLOYMENT_CANCEL, contextResult.userId, contextResult.username, callerRequest, storage:AUDIT_RESOURCE_MI_DEPLOYMENT, deploymentId, string `target=${requestedTargetId}`, "SUCCESS");
-            check caller->respond(responseFor(memory));
-            return;
-        }
-        memory.operation.status = types:CANCELLED;
-        memory.operation.updatedAt = now();
-        error? operationPersisted = storage:updateMIDeploymentOperation(memory.operation);
-        if operationPersisted is error { log:printWarn("Unable to persist deployment status", operationPersisted); }
-        deploymentMemory[deploymentId] = memory;
-        auditRestMutation(storage:AUDIT_MI_DEPLOYMENT_CANCEL, contextResult.userId, contextResult.username, callerRequest, storage:AUDIT_RESOURCE_MI_DEPLOYMENT, deploymentId, "cancel requested", "SUCCESS");
         check caller->respond(responseFor(memory));
     }
 
     resource function patch [string deploymentId]/targets(http:Caller caller, http:Request request) returns error? {
         types:UserContextV2|http:Response contextResult = callerContext(request);
         if contextResult is http:Response { check caller->respond(contextResult); return; }
-        boolean|error permitted = canDeploy(contextResult);
-        if permitted is error || !permitted { check caller->respond(deploymentError(403, "Deployment manage permission required")); return; }
-        if !deploymentMemory.hasKey(deploymentId) { DeploymentMemory|error hydrated = hydrateDeployment(deploymentId); if hydrated is error { check caller->respond(deploymentError(404, "Deployment not found")); return; } }
-        json|error payload = request.getJsonPayload();
-        if payload is error { check caller->respond(deploymentError(400, "decisions payload is required")); return; }
-        DeploymentMemory? found = deploymentMemory[deploymentId];
-        if found is () { check caller->respond(deploymentError(404, "Deployment not found")); return; }
-        DeploymentMemory memory = found;
+        http:Response? denied = deploymentAccess(contextResult, request, deploymentId, true);
+        if denied is http:Response { check caller->respond(denied); return; }
+        DeploymentMemory|error loaded = hydrateDeployment(deploymentId);
+        if loaded is error { check caller->respond(deploymentError(503, "Unable to load deployment details")); return; }
+        DeploymentMemory memory = loaded;
         if !transitionAllowed(memory.operation.status, "decisions") { check caller->respond(deploymentError(409, "Conflict decisions are no longer editable")); return; }
-        if payload is map<json> {
-            json? decisions = payload["decisions"];
-            if decisions is json[] {
-                foreach json item in decisions {
-                    if item is map<json> && item["targetId"] is string && item["deleteBeforeUpload"] is boolean {
-                        string targetId = <string>item["targetId"];
-                        foreach int index in 0 ..< memory.targets.length() {
-                            if memory.targets[index].targetId == targetId {
-                                memory.targets[index].deleteBeforeUpload = <boolean>item["deleteBeforeUpload"];
-                                error? decisionPersisted = storage:updateMIDeploymentTarget(memory.targets[index]);
-                                if decisionPersisted is error { log:printWarn("Unable to persist conflict decision", decisionPersisted); }
-                            }
-                        }
-                    }
-                }
+        json|error payload = request.getJsonPayload();
+        if payload is error || payload !is map<json> || payload["decisions"] !is json[] { check caller->respond(deploymentError(400, "decisions must be an array")); return; }
+        foreach json item in <json[]>payload["decisions"] {
+            if item !is map<json> || item["targetId"] !is string || item["deleteBeforeUpload"] !is boolean { check caller->respond(deploymentError(400, "Invalid target decision")); return; }
+            boolean matched = false;
+            foreach var target in memory.targets {
+                if target.targetId == item["targetId"] { target.deleteBeforeUpload = <boolean>item["deleteBeforeUpload"]; matched = true; }
             }
+            if !matched { check caller->respond(deploymentError(400, "Unknown target")); return; }
         }
-        memory.operation.status = types:READY; memory.operation.updatedAt = now(); deploymentMemory[deploymentId] = memory;
+        memory.operation.status = types:READY;
+        error? saved = storage:saveMIDeploymentDecisions(memory.operation, memory.targets);
+        if saved is error { check caller->respond(deploymentError(503, "Unable to save deployment decisions")); return; }
         check caller->respond(responseFor(memory));
     }
 
     resource function post [string deploymentId]/execute(http:Caller caller, http:Request request) returns error? {
         types:UserContextV2|http:Response contextResult = callerContext(request);
         if contextResult is http:Response { check caller->respond(contextResult); return; }
-        boolean|error permitted = canDeploy(contextResult);
-        if permitted is error || !permitted { check caller->respond(deploymentError(403, "Deployment manage permission required")); return; }
-        if !deploymentMemory.hasKey(deploymentId) { DeploymentMemory|error hydrated = hydrateDeployment(deploymentId); if hydrated is error { check caller->respond(deploymentError(404, "Deployment not found")); return; } }
-        DeploymentMemory? found = deploymentMemory[deploymentId];
-        if found is () { check caller->respond(deploymentError(404, "Deployment not found")); return; }
-        DeploymentMemory memory = found;
-        if !transitionAllowed(memory.operation.status, "execute") { check caller->respond(deploymentError(409, "Deployment must be READY before execution")); return; }
-        memory.operation.status = types:RUNNING;
-        json|error executePayload = request.getJsonPayload();
-        boolean hasProduction = memory.targets.some((target) => target.production && target.eligible);
-        string expected = string `DEPLOY ${memory.operation.artifactName}:${memory.operation.artifactVersion}`;
-        string confirmation = executePayload is json && executePayload is map<json> && executePayload["productionConfirmation"] is string
-            ? <string>executePayload["productionConfirmation"] : "";
-        if hasProduction && confirmation != expected {
+        http:Response? denied = deploymentAccess(contextResult, request, deploymentId, true);
+        if denied is http:Response { check caller->respond(denied); return; }
+        DeploymentMemory|error loaded = hydrateDeployment(deploymentId);
+        if loaded is error { check caller->respond(deploymentError(503, "Unable to load deployment details")); return; }
+        DeploymentMemory memory = loaded;
+        if memory.operation.status != types:READY { check caller->respond(deploymentError(409, "Deployment must be READY before execution")); return; }
+        if !memory.targets.some(t => t.eligible && (!t.conflictDetected || t.deleteBeforeUpload)) { check caller->respond(deploymentError(409, "No eligible targets selected")); return; }
+        json|error payload = request.getJsonPayload();
+        string confirmation = payload is map<json> && payload["productionConfirmation"] is string ? <string>payload["productionConfirmation"] : "";
+        if memory.targets.some(t => t.production && t.eligible && (!t.conflictDetected || t.deleteBeforeUpload)) && confirmation != string `DEPLOY ${memory.operation.artifactName}:${memory.operation.artifactVersion}` {
             check caller->respond(deploymentError(409, "Production confirmation does not match the required phrase")); return;
         }
-        memory.operation.updatedAt = now();
-        error? operationPersisted = storage:updateMIDeploymentOperation(memory.operation);
-        if operationPersisted is error { log:printWarn("Unable to persist deployment status", operationPersisted); }
-        deploymentMemory[deploymentId] = memory;
+        memory.operation.status = types:RUNNING; memory.operation.startedAt = now(); memory.operation.updatedAt = now();
+        error? saved = storage:beginMIDeployment(memory.operation);
+        if saved is error { check caller->respond(deploymentError(409, "Unable to start deployment; refresh its current state")); return; }
         auditRestMutation(storage:AUDIT_MI_DEPLOYMENT_EXECUTE, contextResult.userId, contextResult.username, request, storage:AUDIT_RESOURCE_MI_DEPLOYMENT, deploymentId, string `targets=${memory.targets.length()}`, "SUCCESS");
         _ = start executeDeployment(deploymentId);
         check caller->respond(responseFor(memory));
     }
 
+    resource function post [string deploymentId]/cancel(http:Caller caller, http:Request request) returns error? {
+        types:UserContextV2|http:Response contextResult = callerContext(request);
+        if contextResult is http:Response { check caller->respond(contextResult); return; }
+        http:Response? denied = deploymentAccess(contextResult, request, deploymentId, true);
+        if denied is http:Response { check caller->respond(denied); return; }
+        DeploymentMemory|error loaded = hydrateDeployment(deploymentId);
+        if loaded is error { check caller->respond(deploymentError(503, "Unable to load deployment details")); return; }
+        DeploymentMemory memory = loaded;
+        if !transitionAllowed(memory.operation.status, "cancel") { check caller->respond(deploymentError(409, "Deployment cannot be cancelled in its current state")); return; }
+        json|error payload = request.getJsonPayload();
+        string? targetId = payload is map<json> && payload["targetId"] is string ? <string>payload["targetId"] : ();
+        error? saved = storage:cancelMIDeploymentTargets(memory.operation, targetId);
+        if saved is error { check caller->respond(deploymentError(409, saved.message())); return; }
+        auditRestMutation(storage:AUDIT_MI_DEPLOYMENT_CANCEL, contextResult.userId, contextResult.username, request, storage:AUDIT_RESOURCE_MI_DEPLOYMENT, deploymentId, "Cancellation requested", "SUCCESS");
+        check caller->respond(check storage:getMIDeploymentOperation(deploymentId));
+    }
+
     resource function post [string deploymentId]/recheck(http:Caller caller, http:Request request) returns error? {
         types:UserContextV2|http:Response contextResult = callerContext(request);
         if contextResult is http:Response { check caller->respond(contextResult); return; }
-        boolean|error permitted = canDeploy(contextResult);
-        if permitted is error || !permitted { check caller->respond(deploymentError(403, "Deployment manage permission required")); return; }
-        if !deploymentMemory.hasKey(deploymentId) { DeploymentMemory|error hydrated = hydrateDeployment(deploymentId); if hydrated is error { check caller->respond(deploymentError(404, "Deployment not found")); return; } }
-        DeploymentMemory? found = deploymentMemory[deploymentId];
-        if found is () { check caller->respond(deploymentError(404, "Deployment not found")); return; }
-        DeploymentMemory memory = found;
+        http:Response? denied = deploymentAccess(contextResult, request, deploymentId, true);
+        if denied is http:Response { check caller->respond(denied); return; }
+        boolean workerStopped;
+        lock { workerStopped = deploymentWorkerErrors.hasKey(deploymentId); }
+        if workerStopped {
+            error? recovered = storage:interruptMIDeployment(deploymentId, "Recovering after deployment persistence failure; runtime recheck requested");
+            if recovered is error { check caller->respond(deploymentError(503, "Deployment storage is still unavailable")); return; }
+        }
+        DeploymentMemory|error loaded = hydrateDeployment(deploymentId);
+        if loaded is error { check caller->respond(deploymentError(503, "Unable to load deployment details")); return; }
+        DeploymentMemory memory = loaded;
         if !transitionAllowed(memory.operation.status, "recheck") { check caller->respond(deploymentError(409, "Deployment is not eligible for recheck")); return; }
-        json|error recheckPayload = request.getJsonPayload();
-        string? requestedTargetId = recheckPayload is json && recheckPayload is map<json> && recheckPayload["targetId"] is string
-            ? <string>recheckPayload["targetId"] : ();
-        foreach int index in 0 ..< memory.targets.length() {
-            if memory.targets[index].phase == types:INDETERMINATE && (requestedTargetId is () || memory.targets[index].targetId == requestedTargetId) {
-                memory.targets[index] = recheckTarget(memory, memory.targets[index]);
-                error? targetUpdate = storage:updateMIDeploymentTarget(memory.targets[index]);
-                if targetUpdate is error { log:printWarn("Unable to persist deployment target update", targetUpdate); }
-                error? eventPersisted = storage:persistMIDeploymentEvent(uuid:createType4AsString(), deploymentId, memory.targets[index].targetId, memory.targets[index].phase.toString(), memory.targets[index].message ?: "Target rechecked");
-                if eventPersisted is error { log:printWarn("Unable to persist deployment event", eventPersisted); }
+        json|error payload = request.getJsonPayload();
+        string? targetId = payload is map<json> && payload["targetId"] is string ? <string>payload["targetId"] : ();
+        boolean matched = targetId is ();
+        foreach var target in memory.targets {
+            if targetId is () || target.targetId == targetId {
+                matched = true;
+                if target.phase == types:INDETERMINATE {
+                    types:MIDeploymentTarget checked = recheckTarget(memory, target.clone());
+                    checked.updatedAt = now();
+                    error? saved = storage:saveMIDeploymentTarget(checked);
+                    if saved is error { check caller->respond(deploymentError(503, "Unable to save runtime recheck")); return; }
+                }
             }
         }
-        boolean hasUnresolved = memory.targets.some((target) => target.phase == types:INDETERMINATE);
-        memory.operation.status = hasUnresolved ? types:COMPLETED_WITH_ISSUES : types:COMPLETED; memory.operation.updatedAt = now();
-        error? operationPersisted = storage:updateMIDeploymentOperation(memory.operation);
-        if operationPersisted is error { log:printWarn("Unable to persist deployment status", operationPersisted); }
-        deploymentMemory[deploymentId] = memory;
+        if !matched { check caller->respond(deploymentError(404, "Target not found")); return; }
+        memory.targets = check storage:loadMIDeploymentTargets(deploymentId);
+        memory.operation.status = storage:miDeploymentStatus(memory.targets);
+        memory.operation.updatedAt = now();
+        error? saved = storage:saveMIDeploymentOperation(memory.operation, "Runtime recheck completed");
+        if saved is error { check caller->respond(deploymentError(503, "Unable to save recheck result")); return; }
+        lock { if deploymentWorkerErrors.hasKey(deploymentId) { string removedError = deploymentWorkerErrors.remove(deploymentId); } }
         check caller->respond(responseFor(memory));
     }
 
     resource function post [string deploymentId]/'retry(http:Caller caller, http:Request request) returns error? {
         types:UserContextV2|http:Response contextResult = callerContext(request);
         if contextResult is http:Response { check caller->respond(contextResult); return; }
-        boolean|error permitted = canDeploy(contextResult);
-        if permitted is error || !permitted { check caller->respond(deploymentError(403, "Deployment manage permission required")); return; }
-        if !deploymentMemory.hasKey(deploymentId) { DeploymentMemory|error hydrated = hydrateDeployment(deploymentId); if hydrated is error { check caller->respond(deploymentError(404, "Deployment not found")); return; } }
-        DeploymentMemory? found = deploymentMemory[deploymentId];
-        if found is () { check caller->respond(deploymentError(404, "Deployment not found")); return; }
-        DeploymentMemory original = found; DeploymentMemory retryMemory = original;
-        string[] requestedTargetIds = [];
-        json|error retryPayload = request.getJsonPayload();
-        if retryPayload is json && retryPayload is map<json> && retryPayload["targetIds"] is json {
-            requestedTargetIds = check (<json>retryPayload["targetIds"]).cloneWithType();
-        }
-        retryMemory.operation.deploymentId = uuid:createType4AsString(); retryMemory.operation.parentDeploymentId = original.operation.deploymentId; retryMemory.operation.status = types:READY; retryMemory.operation.createdAt = now(); retryMemory.operation.updatedAt = retryMemory.operation.createdAt;
-        retryMemory.targets = original.targets.filter((target) => (target.phase == types:FAILED || target.phase == types:FAULTY || target.phase == types:INDETERMINATE) && (requestedTargetIds.length() == 0 || requestedTargetIds.indexOf(target.targetId) >= 0));
+        http:Response? denied = deploymentAccess(contextResult, request, deploymentId, true);
+        if denied is http:Response { check caller->respond(denied); return; }
+        DeploymentMemory|error loaded = hydrateDeployment(deploymentId);
+        if loaded is error { check caller->respond(deploymentError(503, "Unable to load deployment details")); return; }
+        DeploymentMemory memory = loaded;
+        if memory.operation.status == types:RUNNING || memory.operation.status == types:CANCELLING { check caller->respond(deploymentError(409, "Wait for deployment execution to finish")); return; }
+        json|error payload = request.getJsonPayload();
+        if payload is error || payload !is map<json> || payload["targetIds"] !is json[] { check caller->respond(deploymentError(400, "targetIds must be an array")); return; }
+        string[]|error targetIds = (<json>payload["targetIds"]).cloneWithType();
+        if targetIds is error { check caller->respond(deploymentError(400, "targetIds must contain strings")); return; }
+        foreach string id in targetIds { if !memory.targets.some(t => t.targetId == id) { check caller->respond(deploymentError(400, "Unknown target")); return; } }
+        string[] requestedIds = targetIds;
+        DeploymentMemory retryMemory = memory.clone();
+        retryMemory.operation.deploymentId = uuid:createType4AsString();
+        retryMemory.operation.parentDeploymentId = deploymentId;
+        retryMemory.operation.createdBy = contextResult.userId;
+        retryMemory.operation.status = types:READY;
+        retryMemory.operation.createdAt = now(); retryMemory.operation.updatedAt = now();
+        retryMemory.operation.startedAt = (); retryMemory.operation.finishedAt = (); retryMemory.operation.durationMs = ();
+        retryMemory.targets = retryMemory.targets.filter(t => (t.phase == types:FAILED || t.phase == types:FAULTY || t.phase == types:INDETERMINATE) && (requestedIds.length() == 0 || requestedIds.indexOf(t.targetId) >= 0));
         if retryMemory.targets.length() == 0 { check caller->respond(deploymentError(409, "No failed or indeterminate targets selected for retry")); return; }
-        foreach int index in 0 ..< retryMemory.targets.length() { retryMemory.targets[index].deploymentId = retryMemory.operation.deploymentId; retryMemory.targets[index].phase = types:QUEUED; retryMemory.targets[index].attempt += 1; }
-        deploymentMemory[retryMemory.operation.deploymentId] = retryMemory; check caller->respond(responseFor(retryMemory));
+        foreach var target in retryMemory.targets {
+            target.targetId = uuid:createType4AsString(); target.deploymentId = retryMemory.operation.deploymentId;
+            target.phase = types:QUEUED; target.startedAt = (); target.finishedAt = (); target.durationMs = ();
+            target.reason = (); target.message = (); target.httpStatus = (); target.evidence = []; target.updatedAt = now();
+        }
+        error? saved = storage:persistMIDeploymentRetry(retryMemory.operation, retryMemory.targets);
+        if saved is error { check caller->respond(deploymentError(503, "Unable to persist deployment retry")); return; }
+        auditRestMutation(storage:AUDIT_MI_DEPLOYMENT_RETRY, contextResult.userId, contextResult.username, request, storage:AUDIT_RESOURCE_MI_DEPLOYMENT, retryMemory.operation.deploymentId, string `parent=${deploymentId}`, "SUCCESS");
+        check caller->respond(responseFor(retryMemory));
     }
+}
+
+function pageParameter(http:Request request, string name, int fallback) returns int {
+    string? value = request.getQueryParamValue(name);
+    if value is () { return fallback; }
+    int|error parsed = int:fromString(value);
+    return parsed is int && parsed >= 0 ? parsed : fallback;
+}
+
+function runtimeErrorStatus(error failure) returns int? {
+    var code = failure.detail()["httpStatus"];
+    return code is int ? code : ();
 }

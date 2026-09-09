@@ -123,7 +123,7 @@ export function useCreateEnvironment() {
 export function useUpdateEnvironment() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (input: Partial<EnvironmentInput> & { environmentId: string; name: string; description: string; critical: boolean }) => gql<{ updateEnvironment: GqlEnvironment }>(UPDATE_ENVIRONMENT, { ...input }).then((d) => d.updateEnvironment),
+    mutationFn: (input: Partial<EnvironmentInput> & { environmentId: string; name: string; handler?: string; description: string; critical: boolean }) => gql<{ updateEnvironment: GqlEnvironment }>(UPDATE_ENVIRONMENT, { ...input }).then((d) => d.updateEnvironment),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['environments'] }),
   });
 }

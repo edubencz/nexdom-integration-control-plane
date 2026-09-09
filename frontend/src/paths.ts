@@ -129,7 +129,7 @@ export function projectRoleDetailUrl(orgHandler: string, projectHandler: string,
   return `/organizations/${orgHandler}/projects/${projectHandler}/settings/access-control/roles/${roleId}/edit`;
 }
 
-export function componentAccessControlUrl(orgHandler: string, projectHandler: string, componentHandler: string, tab: 'roles' | 'groups' = 'roles'): string {
+export function componentAccessControlUrl(orgHandler: string, projectHandler: string, componentHandler: string, tab: string = 'roles'): string {
   return `/organizations/${orgHandler}/projects/${projectHandler}/components/${componentHandler}/settings/access-control/${tab}`;
 }
 

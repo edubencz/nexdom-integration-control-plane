@@ -160,11 +160,13 @@ public isolated function getAuditLogs(types:AuditLogFilter filter = {}) returns 
         string term = "%" + search.trim() + "%";
         query = sql:queryConcat(query, ` AND (UPPER(COALESCE(actor_username, '')) LIKE UPPER(${term}) OR UPPER(COALESCE(details, '')) LIKE UPPER(${term}) OR UPPER(COALESCE(resource_id, '')) LIKE UPPER(${term}))`);
     }
-    if filter.startTime is string {
-        query = sql:queryConcat(query, ` AND timestamp >= ${filter.startTime}`);
+    string? startTime = filter.startTime;
+    if startTime is string {
+        query = sql:queryConcat(query, ` AND timestamp >= `, timestampParameter(startTime));
     }
-    if filter.endTime is string {
-        query = sql:queryConcat(query, ` AND timestamp <= ${filter.endTime}`);
+    string? endTime = filter.endTime;
+    if endTime is string {
+        query = sql:queryConcat(query, ` AND timestamp <= `, timestampParameter(endTime));
     }
     query = sql:queryConcat(query, ` ORDER BY timestamp DESC, id DESC`);
     stream<record {|int id; string? user_id; string? actor_username; string action; string event_source; string? resource_type; string? resource_id; string? details; string? client_ip; string? user_agent; string timestamp;|}, sql:Error?> rows = dbClient->query(query);

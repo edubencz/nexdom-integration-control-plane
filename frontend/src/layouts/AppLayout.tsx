@@ -85,6 +85,11 @@ const SIDEBAR_CATEGORIES: { label: string; resources: Resource[] }[] = [
   { label: 'Management', resources: ['deployments', 'audit-logs', 'access-control'] },
 ];
 
+// Keep the options object stable. Oxygen's useAppShell observes its options
+// object in an effect; creating it during every render causes a state update
+// loop while any page is active.
+const APP_SHELL_OPTIONS = { initialCollapsed: true } as const;
+
 export default function AppLayout(): JSX.Element {
   const navigate = useNavigate();
   const scope = useScope();
@@ -93,7 +98,7 @@ export default function AppLayout(): JSX.Element {
   const { username, displayName, logout } = useAuth();
   const { hasAnyPermission, hasOrgPermission } = useAccessControl();
 
-  const { state: shell, actions } = useAppShell({ initialCollapsed: true });
+  const { state: shell, actions } = useAppShell(APP_SHELL_OPTIONS);
   const [tabIndex, setTabIndex] = useState(0);
   const [confirmDialogOpen, setConfirmDialogOpen] = useState(false);
   const orgCardRef = useRef<HTMLDivElement>(null);
